@@ -1,0 +1,223 @@
+{
+  "scope": "Excerpt of structured output; full input is source.txt. Not an original PDF.",
+  "schema_version": "1.0",
+  "source": {
+    "filename": "source.txt",
+    "sha256": "8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4",
+    "text_sha256": "8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4",
+    "format": "txt",
+    "page_number_basis": null
+  },
+  "metadata": {
+    "act_type": {
+      "value": "Приказ",
+      "start": 0,
+      "end": 6,
+      "text": "Приказ"
+    },
+    "number": {
+      "value": "261",
+      "start": 36,
+      "end": 39,
+      "text": "261"
+    },
+    "adoption_date": {
+      "value": "2020-09-11",
+      "start": 23,
+      "end": 33,
+      "text": "11.09.2020"
+    },
+    "title": {
+      "value": "Об утверждении Административного регламента по предоставлению Федеральным агентством по управлению государственным имуществом государственной услуги по предоставлению в собственность, аренду, постоянное (бессрочное) пользование, безвозмездное пользование земельных участков, находящихся в федеральной собственности, без проведения торгов",
+      "start": 62,
+      "end": 399,
+      "text": "Об утверждении Административного регламента по предоставлению Федеральным агентством по управлению государственным имуществом государственной услуги по предоставлению в собственность, аренду, постоянное (бессрочное) пользование, безвозмездное пользование земельных участков, находящихся в федеральной собственности, без проведения торгов"
+    },
+    "revision_date": {
+      "value": "2023-05-30",
+      "start": 49,
+      "end": 59,
+      "text": "30.05.2023"
+    }
+  },
+  "summary": {
+    "characters": 113889,
+    "fragments": 1360,
+    "observed_numbered_items": 160,
+    "toc_pages_retrieved": 52
+  },
+  "clauses": [
+    {
+      "id": "c-10336",
+      "number": "2.6",
+      "marker": "2.6.",
+      "parent_id": null,
+      "section_id": "s-7232",
+      "heading_id": "s-10292",
+      "start": 10336,
+      "marker_start": 10336,
+      "marker_end": 10340,
+      "fragment_ids": [
+        "f-10336",
+        "f-10504",
+        "f-10562",
+        "f-10597"
+      ],
+      "end": 10598,
+      "page_numbers": []
+    },
+    {
+      "id": "c-64926",
+      "number": "3.3",
+      "marker": "3.3.",
+      "parent_id": null,
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "start": 64926,
+      "marker_start": 64926,
+      "marker_end": 64930,
+      "fragment_ids": [
+        "f-64926",
+        "f-65253"
+      ],
+      "end": 65646,
+      "page_numbers": []
+    },
+    {
+      "id": "c-65646",
+      "number": "3.3.1",
+      "marker": "3.3.1.",
+      "parent_id": "c-64926",
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "start": 65646,
+      "marker_start": 65646,
+      "marker_end": 65652,
+      "fragment_ids": [
+        "f-65646",
+        "f-65793"
+      ],
+      "end": 65794,
+      "page_numbers": []
+    }
+  ],
+  "fragments": [
+    {
+      "id": "f-10336",
+      "text": "2.6. Срок предоставления государственной услуги не должен превышать двадцати дней со дня поступления заявления в Росимущество или в территориальный орган Росимущества.\n",
+      "start": 10336,
+      "end": 10504,
+      "page_number": null,
+      "line_number": 105,
+      "kind": "clause_start",
+      "section_id": "s-7232",
+      "heading_id": "s-10292",
+      "clause_id": "c-10336",
+      "attribution": "explicit_marker",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/1aa697173cd9478ec4d272fd7a89bff5d01c4b0f/"
+    },
+    {
+      "id": "f-10504",
+      "text": "\n",
+      "start": 10504,
+      "end": 10505,
+      "page_number": null,
+      "line_number": 106,
+      "kind": "whitespace",
+      "section_id": "s-7232",
+      "heading_id": "s-10292",
+      "clause_id": "c-10336",
+      "attribution": "continuation",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/1aa697173cd9478ec4d272fd7a89bff5d01c4b0f/"
+    },
+    {
+      "id": "f-10562",
+      "text": "\n",
+      "start": 10562,
+      "end": 10563,
+      "page_number": null,
+      "line_number": 108,
+      "kind": "whitespace",
+      "section_id": "s-7232",
+      "heading_id": "s-10292",
+      "clause_id": "c-10336",
+      "attribution": "continuation",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/1aa697173cd9478ec4d272fd7a89bff5d01c4b0f/"
+    },
+    {
+      "id": "f-10597",
+      "text": "\n",
+      "start": 10597,
+      "end": 10598,
+      "page_number": null,
+      "line_number": 110,
+      "kind": "whitespace",
+      "section_id": "s-7232",
+      "heading_id": "s-10292",
+      "clause_id": "c-10336",
+      "attribution": "continuation",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/1aa697173cd9478ec4d272fd7a89bff5d01c4b0f/"
+    },
+    {
+      "id": "f-64926",
+      "text": "3.3. Основанием для начала административной процедуры (действия) является получение исполнителем Заявительных документов. Рассмотрение Заявительных документов, полученных в электронной форме, осуществляется в том же порядке, что и рассмотрение Заявительных документов, полученных лично от Заявителей или почтовым отправлением.\n",
+      "start": 64926,
+      "end": 65253,
+      "page_number": null,
+      "line_number": 646,
+      "kind": "clause_start",
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "clause_id": "c-64926",
+      "attribution": "explicit_marker",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/72d9b91a6dc7e06e8384421630cce3aa4bb1af9a/"
+    },
+    {
+      "id": "f-65253",
+      "text": "Исполнитель в течение 2 рабочих дней со дня получения заявительных документов проводит проверку указанных документов на предмет полноты представленных заявительных документов. При установлении отсутствия документов, предусмотренных пунктом 2.13 - 2.13.1 Административного регламента, исполнитель запрашивает такие документы в порядке, установленном пунктом 3.4.1 Административного регламента.\n",
+      "start": 65253,
+      "end": 65646,
+      "page_number": null,
+      "line_number": 647,
+      "kind": "text",
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "clause_id": "c-64926",
+      "attribution": "continuation",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/72d9b91a6dc7e06e8384421630cce3aa4bb1af9a/"
+    },
+    {
+      "id": "f-65646",
+      "text": "3.3.1. Критерием принятия решения является наличие (отсутствие) в запросах оснований, указанных в пунктах 2.15, 2.16 Административного регламента.\n",
+      "start": 65646,
+      "end": 65793,
+      "page_number": null,
+      "line_number": 648,
+      "kind": "clause_start",
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "clause_id": "c-65646",
+      "attribution": "explicit_marker",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/72d9b91a6dc7e06e8384421630cce3aa4bb1af9a/"
+    },
+    {
+      "id": "f-65793",
+      "text": "\n",
+      "start": 65793,
+      "end": 65794,
+      "page_number": null,
+      "line_number": 649,
+      "kind": "whitespace",
+      "section_id": "s-56967",
+      "heading_id": "s-64888",
+      "clause_id": "c-65646",
+      "attribution": "continuation",
+      "source_url": "https://www.consultant.ru/document/cons_doc_LAW_362388/72d9b91a6dc7e06e8384421630cce3aa4bb1af9a/"
+    }
+  ],
+  "warnings": [
+    "source_pagination_unavailable",
+    "structure_is_heuristic_review_required",
+    "ambiguous_list_continuation"
+  ]
+}

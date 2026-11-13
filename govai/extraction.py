@@ -1,5 +1,6 @@
 """Extract document text in memory, independently of the Streamlit interface."""
 
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
@@ -23,23 +24,24 @@ def _docx_blocks(container):
         if isinstance(block, Paragraph):
             yield block.text
         elif isinstance(block, Table):
-            for row in block.rows:
-                cells = []
-                previous_cell = None
-                for cell in row.cells:
-                    # Horizontally merged cells share an XML element.
-                    if cell._tc is not previous_cell:
-                        cells.append("\n".join(_docx_blocks(cell)))
-                    previous_cell = cell._tc
-                yield "\t".join(cells)
+            yield from _table_rows(block)
 
 
-def extract_text(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> str:
-    """Read PDF, DOCX or TXT bytes; raise ExtractionError for invalid input.
+def _table_rows(table):
+    seen = set()
+    for row in table.rows:
+        cells = []
+        for cell in row.cells:
+            # Merged cells (horizontal or vertical) share the same XML element.
+            # Deduplicate by identity only: equal text in distinct cells is real.
+            if cell._tc not in seen:
+                cells.append("\n".join(_docx_blocks(cell)))
+                seen.add(cell._tc)
+        yield "\t".join(cells)
 
-    TXT defaults to UTF-8 (with or without BOM). Encoding is explicit to avoid
-    silently interpreting invalid UTF-8 as a different character set.
-    """
+
+def _read_parts(filename: str, data: bytes, encoding: str):
+    """Return text units, known heading offsets and format warnings."""
     extension = Path(filename).suffix.lower().lstrip(".")
     if extension not in SUPPORTED_EXTENSIONS:
         raise ExtractionError("Неподдерживаемый формат. Выберите PDF, DOCX или TXT.")
@@ -61,7 +63,7 @@ def extract_text(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> 
         # NUL and other control bytes usually mean a binary file was renamed.
         if any(ord(char) < 32 and char not in "\n\r\t\f" for char in text):
             raise ExtractionError("TXT содержит бинарные данные или неверную кодировку.")
-        return text
+        return [text], [], []
 
     try:
         if extension == "pdf":
@@ -70,8 +72,25 @@ def extract_text(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> 
                 raise ExtractionError(
                     "PDF защищён паролем. Загрузите копию без защиты."
                 )
-            return "\n\n".join(page.extract_text() or "" for page in reader.pages)
-        return "\n".join(_docx_blocks(Document(BytesIO(data))))
+            parts = [page.extract_text() or "" for page in reader.pages]
+            warnings = [f"pdf_page_without_text:{i}" for i, text in enumerate(parts, 1)
+                        if not text.strip()]
+            return parts, [], warnings
+        document = Document(BytesIO(data))
+        texts, headings, offset = [], [], 0
+        for block in document.iter_inner_content():
+            if isinstance(block, Paragraph):
+                text = block.text
+                style = block.style.style_id if block.style is not None else ""
+                if text and style.lower().startswith(("heading", "заголовок")):
+                    headings.append((offset, offset + len(text)))
+                texts.append(text)
+                offset += len(text) + 1
+            else:
+                for text in _table_rows(block):
+                    texts.append(text)
+                    offset += len(text) + 1
+        return ["\n".join(texts)], headings, ["docx_automatic_numbering_not_resolved"]
     except ExtractionError:
         raise
     except Exception as exc:
@@ -80,3 +99,20 @@ def extract_text(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> 
             f"Не удалось прочитать {extension.upper()}. "
             "Файл повреждён или его содержимое не соответствует расширению."
         ) from exc
+
+
+def extract_text(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> str:
+    """Backward-compatible plain text, including all PDF pages in source order."""
+    parts, _, _ = _read_parts(filename, data, encoding)
+    return "\n\n".join(parts)
+
+
+def extract_document(filename: str, data: bytes, *, encoding: str = "utf-8-sig") -> dict:
+    """Return JSON-compatible text, source locations and conservative structure."""
+    from govai.structure import structure_document
+
+    parts, headings, warnings = _read_parts(filename, data, encoding)
+    extension = Path(filename).suffix.lower().lstrip(".")
+    return structure_document(
+        filename, sha256(data).hexdigest(), extension, parts, headings, warnings
+    )

@@ -62,3 +62,21 @@ def test_whitespace_document_displays_warning():
     assert not app.exception
     assert "не найден текст" in app.warning[0].value
     assert not app.text_area
+
+
+def test_real_npa_structure_is_visible():
+    sample = APP.parent / 'examples/rosimushchestvo_261/source.txt'
+    app = run_with_upload('source.txt', sample.read_bytes())
+    assert not app.exception
+    assert app.subheader[0].value == 'Структура документа'
+    rendered = '\n'.join(item.value for item in app.markdown)
+    assert 'Номер: 261' in rendered
+    assert 'Редакция: 2023-05-30' in rendered
+    assert '2.6.' in app.dataframe[0].value['Пункт'].values
+
+
+def test_unrecognized_structure_preserves_text_in_ui():
+    app = run_with_upload('ordinary.txt', 'Обычный текст без нумерации.'.encode())
+    assert not app.exception
+    assert 'Нумерованные пункты не распознаны' in app.info[0].value
+    assert app.text_area[0].value == 'Обычный текст без нумерации.'
