@@ -6,7 +6,7 @@ from decimal import Decimal
 from govai.economics import FORMULAS, UNITS
 from govai.analysis_io import digest
 
-PRIORITY_VERSION = 'priority-1.0'
+PRIORITY_VERSION = 'priority-1.1'
 PRIORITY_RULES = {
     'weights': {'economic': 25, 'feasibility': 20, 'data': 15, 'delivery': 10, 'risk': 20, 'reliability': 10},
     'feasibility': {'low': 5, 'medium': 3, 'high': 1, 'unknown': 0},
@@ -64,7 +64,8 @@ def rank_initiatives(initiatives, *, incomplete_input=False):
             'label': CATEGORIES[category], 'scores_0_to_5': scores, 'weighted_contributions': contributions,
             'weights': PRIORITY_RULES['weights'], 'unknown_criteria': unknown, 'preliminary': True,
             'reason': a['priority_basis'],
-            'limitations': ['Оценки интеграции, готовности данных, сроков пилота и рисков — гипотезы модели.',
+            'limitations': (['Количественная часть не оценена: финансовых оснований или индивидуальных параметров недостаточно.']
+                           if econ['status'] == 'needs_data' else []) + ['Оценки интеграции, готовности данных, сроков пилота и рисков — гипотезы модели.',
                            'Иллюстративная экономика не повышает экономический балл; неизвестные критерии дают 0.']}})
     ranked.sort(key=lambda a: (-a['priority']['score'], a['id']))
     return [{**a, 'rank': i+1} for i, a in enumerate(ranked)]
@@ -94,7 +95,7 @@ def render_markdown(artifact):
     assumption_sets = {}
     for a in initiatives:
         cases = a['economics']['scenarios']
-        if cases:
+        if any(p['value'] is not None for case in cases for p in case['parameters'].values()):
             parameters = {s['name']: s['parameters'] for s in cases}
             assumption_sets.setdefault(digest(parameters), {'label': f'Набор {len(assumption_sets)+1}', 'parameters': parameters})
     document = ' '.join(str(d.get(k) or '') for k in ('act_type', 'number', 'adoption_date')).strip()
@@ -102,7 +103,7 @@ def render_markdown(artifact):
         _safe(document or 'Нормативный акт'), '',
         'Предварительный отчёт. Это предложения для обсуждения и пилота, а не инвестиционное заключение.', '',
         f"Инициатив: {len(initiatives)}. Отклонённых сценариев: {len(r['rejected'])}. "
-        + f"Статус входной нормализации: {_safe(r['normalization_status'])}.", '']
+        + f"Карта процессов: {"требует проверки" if r['normalization_status'] != "completed" else "обработана; содержательная проверка необходима"}.", '']
     if d.get('revision_date'): lines += ['Редакция: ' + _safe(d['revision_date']), '']
     for warning in r['warnings']: lines += ['- ' + _safe(warning)]
     lines += ['', 'Наиболее перспективные направления по текущим предпосылкам:', '']
@@ -110,12 +111,12 @@ def render_markdown(artifact):
         lines += [f"- **{_safe(a['title'])}** — {_safe(a['expected_effect'])} {_safe(a['priority']['label'])}."]
     if not initiatives: lines += [_safe(r['explanation'])]
     lines += ['', '## Рейтинг инициатив', '',
-              '| Место | Инициатива и процесс | Решение | Базовая экономика | Приоритет | Главное ограничение |',
-              '| --- | --- | --- | --- | --- | --- |']
+              '| Место | Инициатива и процесс | Решение | Механизм эффекта | Индивидуальная оценка | Приоритет | Главное ограничение |',
+              '| --- | --- | --- | --- | --- | --- | --- |']
     for a in initiatives:
         processes = '; '.join(dict.fromkeys(g['process_title'] for g in a['grounding']))
         lines += [f"| {a['rank']} | {_safe(a['title'])}; {_safe(processes)} | {_safe(a['ai_role'])} | "
-                  f"{_safe(economic_summary(a))} | {a['priority']['score']}/100; {_safe(a['priority']['label'])} | {_safe(a['uncertainties'][0])} |"]
+                  f"{_safe(a['effect_mechanism'])} | {_safe(economic_summary(a))} | {a['priority']['score']}/100; {_safe(a['priority']['label'])} | {_safe(a['uncertainties'][0])} |"]
     lines += ['', '**Совокупная экономия не рассчитана:** независимость эффектов не подтверждена. '
               'Высвобождение часов и его стоимостный эквивалент не являются гарантированной экономией бюджета.', '']
     if r['portfolio']['conflicts']:
@@ -140,15 +141,19 @@ def render_markdown(artifact):
         if a['incremental_value']: lines += ['**Добавочная ценность:** ' + _safe(a['incremental_value']), '']
         e = a['economics']
         for reason in e['reasons']: lines += [_safe(reason), '']
-        if e['scenarios']:
+        if any(v['value'] is not None for case in e['scenarios'] for v in case['results'].values()):
             lines += ['| Сценарий | Часы/год | Эквивалент мощности, руб./год | OPEX, руб./год | Эквивалент за вычетом OPEX | Первый год за вычетом внедрения |',
                       '| --- | --- | --- | --- | --- | --- |']
             for s in e['scenarios']:
-                v = s['results']; label = ' — иллюстрация' if s['status'] == 'illustrative' else ' — условная оценка'
+                v = s['results']; label = {'illustrative': ' — иллюстрация', 'conditional_estimate': ' — условная оценка',
+                                         'needs_data': ' — неполные данные'}[s['status']]
                 lines += ['| ' + SCENARIO_LABELS[s['name']] + label + ' | ' + ' | '.join(_number(v[k]['value']) for k in (
                     'released_hours', 'capacity_equivalent', 'annual_opex', 'annual_net_capacity_equivalent', 'first_year_net_capacity_equivalent')) + ' |']
+        if any(p['value'] is not None for case in e['scenarios'] for p in case['parameters'].values()):
             set_key = digest({s['name']: s['parameters'] for s in e['scenarios']})
             lines += ['', assumption_sets[set_key]['label'] + ' предпосылок приведён в методике ниже.', '']
+        if e['status'] == 'needs_data':
+            lines += ['Количественная часть рейтинга не оценена. Нулевой вклад в балл не означает нулевую экономию.', '']
         if e['required_parameters']:
             lines += ['Для инвестиционного решения нужны: ' + ', '.join(PARAMETERS[k] for k in e['required_parameters']) + '.', '']
     lines += ['## Экономическая методика и приоритизация', '',

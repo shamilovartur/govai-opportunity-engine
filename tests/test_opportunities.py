@@ -10,7 +10,7 @@ from govai.economics import REQUIRED
 from govai.extraction import extract_document
 from govai.normalization import normalize_analysis
 from govai.opportunities import (OpportunityPlan, OpportunityError, OpportunitySettings, generate_opportunities,
-    restore_opportunities, prepare_request, blocked_actions)
+    restore_opportunities, prepare_request, economic_restrictions, operational_action_ids, compact_input)
 from govai.opportunity_report import render_markdown, rank_initiatives
 from govai.processes import ProcessError, Candidates, extract_processes
 from opportunity_helpers import map_case, simple_map, proposal, three_proposals, OpportunityMock, supplied_scenarios
@@ -31,7 +31,8 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
     assert json.dumps([raw,n],ensure_ascii=False)==original
     assert result['stage_status']=='completed' and result['report']['status']=='preliminary'
     for i in result['report']['initiatives']:
-        assert i['economics']['status']=='illustrative'
+        assert i['economics']['status']=='needs_data'
+        assert i['economics']['scenarios']==[]
         assert i['priority']['scores_0_to_5']['economic']==0
         assert set(i['source_action_ids']) <= a.actions.keys()
         for g in i['grounding']:
@@ -41,7 +42,9 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
     text=render_markdown(result)
     for heading in ['Резюме для руководителя','Рейтинг инициатив','Краткие business cases','Доказательная база','Экономическая методика']:
         assert heading in text
-    assert '270.00' in text and 'Иллюстративное допущение' in text
+    assert '270.00' not in text and '270 000' not in text
+    assert 'Требуются дополнительные данные' in text and '| Сценарий |' not in text
+    assert 'Механизм эффекта' in text and 'Количественная часть рейтинга не оценена' in text
     assert result['report']['portfolio']['total_budget_savings'] is None
     assert result['metrics']['usage']['total_tokens']==150
     assert 'source_candidates' in provider.calls[0] and 'text' not in provider.calls[0]
@@ -49,14 +52,16 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
 
 def test_incomplete_map_preserves_warning_and_blocks_disputed_action_as_financial_basis():
     _,_,a,n=map_case(incomplete=True)
-    disputed=next(x for x in n['map']['actions'] if x['kind']=='review')
+    disputed=next(x for x in n['map']['actions'] if x['id']=='review-action-b24087c749856e83')
     rows=three_proposals(n).proposals
-    bad=proposal(n,[disputed['id']],key='bad',title='Недопустимый эффект спорного действия')
+    bad=proposal(n,[disputed['id']],key='pending',title='Помощь при приёме документов на спорном этапе')
     r=generate_opportunities(n,a,OpportunityMock(plan(*[x.model_dump() for x in rows],bad)))['report']
     assert r['normalization_status']=='incomplete'
     assert any('неполная' in w for w in r['warnings'])
-    assert len(r['initiatives'])==3 and r['rejected'][0]['id']=='bad'
-    assert all(disputed['id'] not in i['action_ids'] for i in r['initiatives'])
+    assert len(r['initiatives'])==4 and not r['rejected']
+    candidate=next(i for i in r['initiatives'] if i['id']=='pending')
+    assert candidate['economics']['status']=='needs_data' and not candidate['economics']['scenarios']
+    assert any('отложена' in x for x in candidate['uncertainties'])
     assert all(x['reasons'] for x in r['portfolio']['excluded_from_total'])
 
 
@@ -136,7 +141,7 @@ def test_no_eligible_actions_requires_no_model_and_empty_model_answer_is_preserv
     none=OpportunityMock(plan(rejected=[{'title':'Фиксированный шаблон','action_ids':['op-0'],'reason':'Достаточно обычной автоматизации'}]))
     result=generate_opportunities(n,a,none)
     assert not result['report']['initiatives'] and len(none.calls)==1
-    blank=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    blank=normalize_analysis(a,Normalizer(plan_for(a,[node(a,list(a.actions),kind='requirement')])))
     result=generate_opportunities(blank,a,None)
     assert result['metrics']['requests']==0 and not result['report']['initiatives']
 
@@ -147,24 +152,27 @@ def test_preflight_limits_stop_without_truncation_or_calls():
         generate_opportunities(n,a,provider,settings=OpportunitySettings(max_input_bytes=100))
     assert not provider.calls and failure.value.metrics['requests']==0
     data,size=prepare_request(n,a)
-    assert len(data['actions'])+len(data['blocked_actions'])==len(n['map']['actions'])
+    assert len(data['actions'])==len(n['map']['actions'])
+    assert set(data['economic_restrictions']) <= {x['id'] for x in data['actions']}
     assert size['max_output_tokens']==20000
 
 
 def test_restore_recomputes_grounding_finances_and_ranking_without_calls():
     _,_,a,n=map_case(); provider=OpportunityMock(three_proposals(n))
-    saved=generate_opportunities(n,a,provider)
+    saved=generate_opportunities(n,a,provider,scenario_inputs={'documents':supplied_scenarios()})
     restored=restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')
     assert restored==saved and len(provider.calls)==1
     for field in ['economics','priority','evidence']:
         bad=deepcopy(saved)
         if field=='evidence': next(iter(bad['report']['evidence'].values()))['quote']='Fake citation'
         elif field=='priority': bad['report']['initiatives'][0]['priority']['score']=100
-        else: bad['report']['initiatives'][0]['economics']['scenarios'][0]['results']['released_hours']['value']='1000000'
+        else:
+            item=next(i for i in bad['report']['initiatives'] if i['id']=='documents')
+            item['economics']['scenarios'][1]['results']['released_hours']['value']='1000000'
         with pytest.raises(ProcessError,match='изменён'): restore_opportunities(json.dumps(bad).encode(),n,a,'test-model')
     with pytest.raises(ProcessError,match='несовместим'): restore_opportunities(json.dumps(saved).encode(),n,a,'other-model')
     with pytest.raises(ProcessError,match='несовместим'):
-        restore_opportunities(json.dumps(saved).encode(),n,a,'test-model',settings=OpportunitySettings(illustrative_scenarios=False))
+        restore_opportunities(json.dumps(saved).encode(),n,a,'test-model',settings=OpportunitySettings(illustrative_scenarios=True))
 
 
 def test_user_premises_have_provenance_and_normative_deadline_is_not_work_time():
@@ -245,4 +253,175 @@ def test_context_keeps_a_source_chain_but_does_not_increase_economic_scope():
     assert row['context_grounding'][0]['economic_basis'] is False
     assert row['context_grounding'][0]['source_candidates']
     assert not set(context['source_action_ids']) & set(row['source_action_ids'])
-    assert row['economics']['scenarios'][1]['results']['released_hours']['value']=='270.00'
+    assert row['economics']['scenarios']==[]
+    assert row['economics']['status']=='needs_data'
+
+
+def unpack_payload(value, payload):
+    if isinstance(value, dict):
+        if set(value)=={'text_ref'}: return payload['texts'][value['text_ref']]
+        return {k:unpack_payload(v,payload) for k,v in value.items()}
+    if isinstance(value,list): return [unpack_payload(v,payload) for v in value]
+    return value
+
+
+def test_all_verified_records_and_conditions_remain_visible_losslessly():
+    _,_,a,n=map_case(incomplete=True)
+    payload,_=prepare_request(n,a); expanded=unpack_payload(payload,payload)
+    assert {x['id'] for x in expanded['actions']}=={x['id'] for x in n['map']['actions']}
+    assert expanded['processes']==[{k:p[k] for k in ('id','title','summary','lane')} for p in n['map']['processes']]
+    for sid,source in a.actions.items():
+        entry=expanded['source_candidates'][sid]
+        for field in ('description','refs','actor','inputs','outputs','conditions','dependencies'):
+            assert entry.get(field,[])==source[field]
+    for eid,ref in payload['evidence'].items():
+        start,end=ref['span']
+        assert payload['quotes'][ref['quote_ref']][start:end]==a.evidence[eid]['quote']
+    assert set(payload['evidence'])=={e for x in n['map']['actions'] for e in x['retained_evidence_refs']}
+    assert all(x['kind'] and 'process_id' in x for x in expanded['actions'])
+    assert 'source_diagnostics' not in expanded
+
+
+def test_all_operations_can_be_review_only_and_still_generate_qualitative_hypothesis():
+    _,_,a,_=simple_map(('Специалист сопоставляет содержание документов и готовит проект ответа.',))
+    n=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    aid=n['map']['actions'][0]['id']; original=deepcopy(n)
+    assert set(economic_restrictions(n['map']))==operational_action_ids(n['map'])=={aid}
+    provider=OpportunityMock(plan(proposal(n,[aid])))
+    result=generate_opportunities(n,a,provider,scenario_inputs={'pilot':supplied_scenarios()})
+    item=result['report']['initiatives'][0]
+    assert len(provider.calls)==1 and n==original and result['report']['normalization_status']=='incomplete'
+    assert item['action_ids']==[aid] and item['grounding'][0]['source_candidates']
+    assert item['economics']['status']=='needs_data' and item['economics']['scenarios']==[]
+    assert any('Группировка' in text for text in item['uncertainties'])
+    assert item['priority']['scores_0_to_5']['economic']==0
+
+
+def test_mixed_clean_and_disputed_scope_is_not_calculated_using_only_clean_actions():
+    _,_,a,n=map_case(incomplete=True)
+    reviewed='review-action-b24087c749856e83'
+    p=proposal(n,['receipt',reviewed])
+    r=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied_scenarios()})
+    item=r['report']['initiatives'][0]
+    assert item['action_ids']==['receipt',reviewed]
+    assert item['economics']['status']=='needs_data' and not item['economics']['scenarios']
+    assert any('всей инициативы' in text for text in item['economics']['reasons'])
+
+
+@pytest.mark.parametrize('kind',['overview','requirement','context','excluded'])
+def test_contextual_records_visible_but_cannot_supply_independent_operational_basis(kind):
+    _,_,a,_=simple_map(('Специалист анализирует материалы.', 'Услуга предоставляется в установленном порядке.'))
+    ids=list(a.actions)
+    nodes=[node(a,[ids[0]],key='operation'),node(a,[ids[1]],key='context',kind=kind,
+           review_reason='Не самостоятельная операция.' if kind=='excluded' else None)]
+    n=normalize_analysis(a,Normalizer(plan_for(a,nodes)))
+    payload,_=prepare_request(n,a)
+    assert any(x['id']=='context' and x['kind']==kind for x in payload['actions'])
+    rows=[proposal(n,['context'],key='bad',title='Общее требование'),
+          proposal(n,['operation'],key='good',context_action_ids=['context'])]
+    r=generate_opportunities(n,a,OpportunityMock(plan(*rows)))['report']
+    assert [i['id'] for i in r['initiatives']]==['good']
+    assert 'операционного основания' in r['rejected'][0]['reason']
+    assert r['initiatives'][0]['context_grounding'][0]['economic_basis'] is False
+
+
+def test_real_automatic_quote_survives_review_with_nonautomatic_candidate_title():
+    from test_normalization import real_case
+    doc,raw,a=real_case()  # Small public excerpt fixture, not the uploaded user JSON.
+    sid='action-aceadc34c5efaaab'
+    for group in raw['procedures']:
+        for row in group['actions']:
+            if row['id']==sid: row['description']='Проверить электронное заявление и основания отказа.'
+    a=verify_analysis(json.dumps(raw).encode(),doc)
+    n=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    aid='review-'+sid; assert next(x for x in n['map']['actions'] if x['id']==aid)['mode']=='unknown'
+    payload,_=prepare_request(n,a)
+    assert any('автоматическ' in text for text in payload['quotes'].values())
+    first=generate_opportunities(n,a,OpportunityMock(plan(proposal(n,[aid]))))['report']
+    assert not first['initiatives'] and 'автоматизация' in first['rejected'][0]['reason']
+    extra=proposal(n,[aid],novelty='incremental',incremental_value='Семантические противоречия между документами сверх проверки полей.')
+    second=generate_opportunities(n,a,OpportunityMock(plan(extra)))['report']['initiatives'][0]
+    assert second['economics']['scenarios']==[] and second['economics']['status']=='needs_data'
+    assert any('автоматизац' in reason for reason in second['economics']['reasons'])
+
+
+def test_unrelated_automation_context_does_not_veto_other_operation():
+    _,_,a,n=simple_map(('Специалист сопоставляет сведения и готовит проект ответа.',
+                        'Система автоматически проверяет заполнение обязательного поля.'))
+    p=proposal(n,['op-0'],context_action_ids=['op-1'])
+    r=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied_scenarios()})['report']
+    assert not r['rejected'] and r['initiatives'][0]['economics']['status']=='conditional_estimate'
+    assert r['initiatives'][0]['economics']['scenarios'][1]['results']['released_hours']['value']=='270.00'
+    assert 'op-1' not in r['initiatives'][0]['action_ids']
+
+
+def test_lane_review_preserves_operation_but_blocks_money_and_retains_review_reasons():
+    _,_,a,_=simple_map()
+    row=node(a,list(a.actions),key='op',review_reason='Спорен исполнитель, нужно уточнить границы.')
+    draft=plan_for(a,[row]); draft.processes[0].lane='review'
+    n=normalize_analysis(a,Normalizer(draft)); payload,_=prepare_request(n,a)
+    assert payload['actions'][0]['id']=='op' and payload['processes'][0]['lane']=='review'
+    r=generate_opportunities(n,a,OpportunityMock(plan(proposal(n,['op']))),scenario_inputs={'pilot':supplied_scenarios()})
+    item=r['report']['initiatives'][0]
+    assert not item['economics']['scenarios']
+    assert 'Спорен исполнитель, нужно уточнить границы.' in item['uncertainties']
+    assert r['report']['status']=='preliminary'
+
+
+def test_old_opportunity_report_requires_only_report_regeneration():
+    _,_,a,n=map_case(); r=generate_opportunities(n,a,OpportunityMock(three_proposals(n)))
+    old=deepcopy(r); old['schema_version']='1.0'
+    with pytest.raises(ProcessError,match='Повторите только формирование отчёта'):
+        restore_opportunities(json.dumps(old).encode(),n,a,'test-model')
+    assert restore_opportunities(json.dumps(r).encode(),n,a,'test-model')==r
+
+
+def test_explicit_scenarios_remain_individual_and_partial_unknowns_not_zero():
+    _,_,a,n=map_case(); scenarios=supplied_scenarios()
+    scenarios[1]['parameters']['hour_cost'].update(value=None,origin='unknown',note='Стоимость неизвестна')
+    r=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'documents':scenarios})
+    rows={i['id']:i for i in r['report']['initiatives']}
+    base=rows['documents']['economics']['scenarios'][1]
+    assert base['results']['released_hours']['value']=='270.00'
+    assert base['results']['capacity_equivalent']['value'] is None
+    assert not rows['grounded-reply']['economics']['scenarios']
+    assert not rows['correction-help']['economics']['scenarios']
+    assert rows['documents']['priority']['scores_0_to_5']['economic']==0
+    assert r['report']['portfolio']['total_released_hours'] is None
+
+
+def test_explicit_individual_illustrative_assumptions_are_preserved_without_spreading():
+    from govai.economics import illustrative_scenarios
+    _,_,a,n=map_case()
+    r=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'documents':illustrative_scenarios()})
+    rows={i['id']:i for i in r['report']['initiatives']}
+    assert rows['documents']['economics']['status']=='illustrative'
+    assert rows['documents']['economics']['scenarios'][1]['results']['released_hours']['value']=='270.00'
+    assert all(p['origin']=='illustrative' for s in rows['documents']['economics']['scenarios'] for p in s['parameters'].values())
+    assert all(not rows[k]['economics']['scenarios'] for k in ('grounded-reply','correction-help'))
+
+
+@pytest.mark.parametrize('fault',['unknown','foreign'])
+def test_qualitative_review_hypothesis_cannot_bypass_evidence_checks(fault):
+    _,_,a,_=simple_map(('Специалист анализирует содержание заявления.', 'Специалист готовит ответ.'))
+    n=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    aids=[x['id'] for x in n['map']['actions']]
+    p=proposal(n,[aids[0]],economic_model='qualitative')
+    p['evidence_refs']=['invented'] if fault=='unknown' else next(x for x in n['map']['actions'] if x['id']==aids[1])['evidence_refs']
+    with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(p)))
+
+
+def test_fields_removed_by_extraction_are_not_reintroduced_as_context():
+    from test_processes import document,candidate,MockProvider
+    doc=document('1. Исполнитель проверяет документы и готовит проект ответа.')
+    def answer(payload):
+        c=candidate(payload['core'][0])
+        c['actions'][0]['actor']={'text':'ВЫДУМАННЫЙ_ИСПОЛНИТЕЛЬ','evidence':[
+            {'fragment_id':payload['core'][0]['fragment_id'],'quote':'НЕСУЩЕСТВУЮЩАЯ_ЦИТАТА'}]}
+        return [c]
+    raw=extract_processes(doc,MockProvider(answer)); a=verify_analysis(json.dumps(raw).encode(),doc)
+    assert a.raw['rejected_candidates'] and not next(iter(a.actions.values()))['actor']
+    n=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    payload,_=prepare_request(n,a); serialized=json.dumps(payload,ensure_ascii=False)
+    assert 'ВЫДУМАННЫЙ_ИСПОЛНИТЕЛЬ' not in serialized and 'НЕСУЩЕСТВУЮЩАЯ_ЦИТАТА' not in serialized
+    assert len(payload['source_candidates'])==1 and payload['quotes']

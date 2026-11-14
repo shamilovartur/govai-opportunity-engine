@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from govai.economics import (Parameter, Scenario, UNITS, calculate_scenario, assess_economics,
+from govai.economics import (REQUIRED, Parameter, Scenario, UNITS, calculate_scenario, assess_economics,
                              illustrative_scenarios, unknown_parameters, portfolio_assessment)
 from govai.processes import ProcessError
 
@@ -37,10 +37,11 @@ def test_unknown_cost_is_not_zero_and_does_not_erase_known_hours():
 
 
 def test_no_parameters_no_implicit_factual_defaults():
-    e = assess_economics('time_capacity', allow_illustrative=False)
+    e = assess_economics('time_capacity')
     assert e['status']=='needs_data'
     assert all(p['value'] is None for p in e['input_parameters'].values())
-    assert all(v['value'] is None for s in e['scenarios'] for v in s['results'].values())
+    assert e['scenarios'] == []
+    assert set(e['required_parameters']) == set(REQUIRED)
 
 
 @pytest.mark.parametrize('value', ['NaN','Infinity','-1','1e100000','0.00000000000000001'])

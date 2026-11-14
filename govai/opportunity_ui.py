@@ -9,7 +9,7 @@ import streamlit as st
 from govai.analysis_io import digest
 from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
-                                 restore_opportunities, blocked_actions)
+                                 restore_opportunities, operational_action_ids)
 from govai.opportunity_report import economic_summary, render_markdown
 from govai.processes import ProcessError
 
@@ -34,7 +34,7 @@ def render_opportunity_testing(normalized, analysis):
     if key not in cache and st.button('Сформировать отчёт', type='primary'):
         provider = None; started = time.perf_counter()
         try:
-            if len(blocked_actions(normalized['map'])) < len(normalized['map']['actions']):
+            if operational_action_ids(normalized['map']):
                 try:
                     secrets = st.secrets.to_dict()
                 except FileNotFoundError:
@@ -58,12 +58,13 @@ def render_opportunity_testing(normalized, analysis):
         report = artifact['report']
         st.caption('Отчёт восстановлен без API.' if st.session_state.get('opportunity_origins', {}).get(key) == 'imported'
                    else 'Отчёт сформирован в текущей сессии.')
-        st.warning('Предварительные гипотезы. Иллюстративные числа не являются показателями ведомства или экономией бюджета.')
+        st.warning('Предварительные гипотезы. Без индивидуальных параметров числовой эффект не оценён; сценарные допущения не являются показателями ведомства или экономией бюджета.')
         if report['normalization_status'] != 'completed':
-            st.warning('Входная карта неполная или спорная. Отложенные действия не включены в расчёт.')
+            st.warning('Входная карта неполная или спорная. Подтверждённые операции учтены в поиске; замечания ограничивают числовую оценку.')
         st.write(f"Инициатив: {len(report['initiatives'])}; отклонённых сценариев: {len(report['rejected'])}.")
         if report['initiatives']:
-            st.dataframe([{'Место': a['rank'], 'Инициатива': a['title'], 'Приоритет': a['priority']['label'],
+            st.dataframe([{'Место': a['rank'], 'Инициатива': a['title'], 'Решение': a['ai_role'], 'Механизм эффекта': a['effect_mechanism'],
+                           'Главное ограничение': a['uncertainties'][0], 'Приоритет': a['priority']['label'],
                            'Балл': a['priority']['score'], 'Экономика': economic_summary(a)}
                           for a in report['initiatives']], hide_index=True)
             for a in report['initiatives'][:3]:

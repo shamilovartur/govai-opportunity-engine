@@ -97,3 +97,48 @@ def test_missing_key_is_a_stage_specific_error_without_model_call(monkeypatch):
         assert not app.exception and 'OPENAI_API_KEY' in app.error[0].value
         assert 'AI-возможностей' in app.error[0].value
         assert next(iter(app.session_state['opportunity_failures'].values()))['requests']==0
+
+
+def test_review_only_map_creates_provider_and_keeps_hypothesis_without_money(monkeypatch):
+    from test_normalization import plan_for
+    from govai.opportunities import economic_restrictions
+    a,_,_,_=setup_inputs()
+    n=normalize_analysis(a,Normalizer(plan_for(a,[])))
+    _,_,original,uploader=inputs(normalized=n)
+    aid=n['map']['actions'][0]['id']
+    assert len(economic_restrictions(n['map']))==len(n['map']['actions'])
+    UIProvider.prepared=plan(proposal(n,[aid])); UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider), \
+         patch('govai.process_ui.extract_with_checkpoint',side_effect=AssertionError('No extraction')), \
+         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')):
+        app=load_to_technical(AppTest.from_file(str(APP)))
+        button(app,'Сформировать отчёт').click().run()
+        assert not app.exception and not app.error and UIProvider.count==1
+        report=next(iter(app.session_state['opportunity_reports'].values()))['report']
+        assert report['initiatives'][0]['economics']['scenarios']==[]
+        assert report['normalization_status']=='incomplete'
+        assert any('учтены в поиске' in x.value for x in app.warning)
+        assert app.session_state['process_result_bytes']==original
+        app.run(); assert UIProvider.count==1
+        assert all(b.proto.ignore_rerun for b in app.get('download_button'))
+
+
+def test_context_only_map_has_empty_result_without_provider_or_key(monkeypatch):
+    from test_normalization import plan_for,node
+    a,_,_,_=setup_inputs()
+    n=normalize_analysis(a,Normalizer(plan_for(a,[node(a,[sid],key=f'context-{i}',kind='context')
+                                               for i,sid in enumerate(a.actions)])))
+    _,_,_,uploader=inputs(normalized=n)
+    monkeypatch.delenv('OPENAI_API_KEY',raising=False)
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.OpenAIOpportunityProvider',side_effect=AssertionError('No provider')):
+        # Preserve provider.name without creating an instance.
+        import govai.opportunity_ui
+        govai.opportunity_ui.OpenAIOpportunityProvider.name='openai'
+        app=load_to_technical(AppTest.from_file(str(APP)))
+        button(app,'Сформировать отчёт').click().run()
+        assert not app.exception and not app.error
+        artifact=next(iter(app.session_state['opportunity_reports'].values()))
+        assert artifact['metrics']['requests']==0 and not artifact['report']['initiatives']
+        assert 'операционных оснований' in artifact['report']['explanation']

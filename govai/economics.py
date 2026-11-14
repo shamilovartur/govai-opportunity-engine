@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 
 from govai.processes import ProcessError, StrictModel
 
-METHOD_VERSION = 'capacity-1.0'
+METHOD_VERSION = 'capacity-1.1'
 UNITS = {
     'annual_cases': 'cases/year', 'applicability': 'share', 'adoption': 'share',
     'before_minutes': 'minutes/case', 'after_minutes': 'minutes/case', 'realization': 'share',
@@ -122,16 +122,17 @@ def calculate_scenario(scenario: Scenario | dict) -> dict:
         raise ProcessError('Некорректные параметры экономики: проверьте происхождение, единицы, доли и конечные числа.') from exc
 
 
-def assess_economics(model, *, blocked_reasons=(), scenarios=None, allow_illustrative=True):
+def assess_economics(model, *, blocked_reasons=(), scenarios=None, allow_illustrative=False):
     """No hidden factual defaults. Illustration is an explicit, separately marked case."""
     missing = list(REQUIRED) if model == 'time_capacity' else []
-    if blocked_reasons or model == 'qualitative':
+    if blocked_reasons or model == 'qualitative' or (scenarios is None and not allow_illustrative):
         return {'model': model, 'status': 'needs_data', 'scenarios': [], 'input_parameters': unknown_parameters(),
                 'required_parameters': missing, 'reasons': list(blocked_reasons) or [
-                    'Количественный механизм не обоснован; нужны данные о трудозатратах и качестве.']}
+                    'Индивидуальные параметры не предоставлены; количественная оценка не выполнена.' if model == 'time_capacity'
+                    else 'Количественный механизм не обоснован; нужны данные о трудозатратах и качестве.']}
     supplied = scenarios is not None
     if scenarios is None:
-        scenarios = illustrative_scenarios() if allow_illustrative else [Scenario(name=n, parameters={}) for n in SCENARIOS]
+        scenarios = illustrative_scenarios()
     names = [Scenario.model_validate(s).name for s in scenarios]
     if len(names) != 3 or set(names) != set(SCENARIOS):
         raise ProcessError('Нужны три различных сценария: консервативный, базовый и оптимистичный.')
