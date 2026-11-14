@@ -14,6 +14,11 @@ APP = Path(__file__).resolve().parents[1] / 'app.py'
 def upload(text):
     return UploadedFile(UploadedFileRec('test', 'document.txt', 'text/plain', text.encode()), FileURLs())
 
+def technical(app):
+    next(r for r in app.radio if r.label == 'Раздел приложения').set_value('Технические данные').run()
+    return app
+
+
 
 def button(app):
     return next(b for b in app.button if b.label == 'Извлечь процессы')
@@ -43,7 +48,7 @@ def test_missing_key_visible_and_never_calls_provider(monkeypatch):
     with patch('streamlit.file_uploader', return_value=upload('1. Зарегистрировать обращение.\n')), \
          patch('streamlit.runtime.secrets.Secrets.to_dict', return_value={}), \
          patch('govai.process_ui.OpenAIProvider') as factory:
-        app = AppTest.from_file(str(APP)).run()
+        app = technical(AppTest.from_file(str(APP)).run())
         button(app).click().run()
         assert not app.exception
         assert 'OPENAI_API_KEY' in app.error[0].value
@@ -56,13 +61,14 @@ def test_hierarchy_evidence_export_rerun_and_changed_document(monkeypatch):
     monkeypatch.setenv('OPENAI_MODEL', 'ui-test')
     with patch('streamlit.file_uploader', return_value=upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider):
-        app = AppTest.from_file(str(APP)).run()
+        app = technical(AppTest.from_file(str(APP)).run())
         button(app).click().run()
         assert not app.exception and not app.error
         assert len(app.session_state['process_result']['procedures']) == 1
-        assert any('Подтверждающие пункты' in e.label for e in app.expander)
+        assert 'verified_analysis' in app.session_state
+        assert not app.text  # raw action details are not all rendered on extraction
         assert any(b.label == 'Скачать процессы JSON' for b in app.get('download_button'))
-        assert any('пункт 1' in c.value for c in app.caption)
+        assert any(e['clause_number'] == '1' for e in app.session_state['verified_analysis'].evidence.values())
         app.run()
         assert app.session_state['process_result']['provider'] == 'mock'
     with patch('streamlit.file_uploader', return_value=upload('Другой документ.')):
@@ -76,7 +82,7 @@ def test_completed_checkpoint_skips_api_on_repeated_analysis(monkeypatch):
     monkeypatch.setenv('OPENAI_MODEL', 'ui-test')
     with patch('streamlit.file_uploader', return_value=upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider):
-        app = AppTest.from_file(str(APP)).run()
+        app = technical(AppTest.from_file(str(APP)).run())
         button(app).click().run()
         assert 'process_result' in app.session_state
         with patch.object(Provider, 'extract', side_effect=AssertionError('Repeated API call')) as extract:
@@ -107,7 +113,7 @@ def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
     with patch('streamlit.file_uploader', side_effect=lambda label, **kw:
                None if label == 'Checkpoint JSON' else document_upload), \
          patch('govai.process_ui.OpenAIProvider', InterruptOnce):
-        first = AppTest.from_file(str(APP)).run()
+        first = technical(AppTest.from_file(str(APP)).run())
         button(first).click().run()
         assert not first.exception
         assert 'Успешно обработано блоков: 1/3' in first.error[0].value
@@ -122,7 +128,7 @@ def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
     with patch('streamlit.file_uploader', side_effect=lambda label, **kw:
                restored_upload if label == 'Checkpoint JSON' else document_upload), \
          patch('govai.process_ui.OpenAIProvider', InterruptOnce):
-        second = AppTest.from_file(str(APP)).run()  # new session, no shared Streamlit state
+        second = technical(AppTest.from_file(str(APP)).run())  # new session, no shared Streamlit state
         assert not second.session_state['process_checkpoints']
         next(b for b in second.button if b.label == 'Восстановить checkpoint').click().run()
         assert not second.exception and not second.error
@@ -156,7 +162,7 @@ def test_incompatible_import_rejected_without_api_or_state_replacement(monkeypat
                uploaded if label == 'Checkpoint JSON' else upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider), \
          patch.object(Provider, 'extract', side_effect=AssertionError('Must not call API')) as api:
-        app = AppTest.from_file(str(APP)).run()
+        app = technical(AppTest.from_file(str(APP)).run())
         next(b for b in app.button if b.label == 'Восстановить checkpoint').click().run()
         assert not app.exception
         assert 'несовместим' in app.error[0].value

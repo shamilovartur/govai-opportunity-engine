@@ -1,0 +1,990 @@
+{
+  "note": "Selected real candidate excerpts for regression tests; not the complete user upload. Quotes and metadata are reconstructed from the public source.txt with original offsets. Plans in tests are hand-authored, not live LLM results.",
+  "procedures": [
+    {
+      "id": "procedure-c-57166",
+      "title": "Рассмотрение Заявительных документов",
+      "title_variants": [
+        "Запрос документов для предоставления государственной услуги",
+        "Принятие решения по предоставлению услуги и направлению документов",
+        "Принятие решения о предоставлении земельного участка без торгов",
+        "Выдача документов о предоставлении земельного участка",
+        "Исправление опечаток и ошибок в выданных документах"
+      ],
+      "anchor_evidence": [
+        {
+          "fragment_id": "f-57363",
+          "matches": [
+            {
+              "start": 57363,
+              "end": 57402
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-57404",
+          "matches": [
+            {
+              "start": 57404,
+              "end": 57696
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-57697",
+          "matches": [
+            {
+              "start": 57697,
+              "end": 57993
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-57995",
+          "matches": [
+            {
+              "start": 57995,
+              "end": 58072
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-58074",
+          "matches": [
+            {
+              "start": 58074,
+              "end": 58162
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-58163",
+          "matches": [
+            {
+              "start": 58163,
+              "end": 58350
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "description": "Рассмотреть Заявительные документы",
+          "evidence": [
+            {
+              "fragment_id": "f-57363",
+              "matches": [
+                {
+                  "start": 57363,
+                  "end": 57402
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-58571",
+              "matches": [
+                {
+                  "start": 58571,
+                  "end": 58610
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Заявительные документы",
+              "evidence": [
+                {
+                  "fragment_id": "f-57363",
+                  "matches": [
+                    {
+                      "start": 57363,
+                      "end": 57402
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-64fde2c3870b8209"
+        },
+        {
+          "description": "Запросить необходимые документы, находящиеся в распоряжении органов и организаций",
+          "evidence": [
+            {
+              "fragment_id": "f-57404",
+              "matches": [
+                {
+                  "start": 57404,
+                  "end": 57696
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-58611",
+              "matches": [
+                {
+                  "start": 58611,
+                  "end": 58903
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [],
+          "conditions": [
+            {
+              "text": "Запрашиваются необходимые для услуги документы, находящиеся в распоряжении государственных органов, органов местного самоуправления и иных организаций, которые Заявитель вправе представить",
+              "evidence": [
+                {
+                  "fragment_id": "f-57404",
+                  "matches": [
+                    {
+                      "start": 57413,
+                      "end": 57696
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependencies": [],
+          "id": "action-805a660a3075ba2d"
+        },
+        {
+          "description": "Принять решение о предоставлении государственной услуги или об отказе",
+          "evidence": [
+            {
+              "fragment_id": "f-57697",
+              "matches": [
+                {
+                  "start": 57699,
+                  "end": 57789
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-58904",
+              "matches": [
+                {
+                  "start": 58906,
+                  "end": 58996
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [
+            {
+              "text": "Решение о предоставлении государственной услуги или об отказе в ее предоставлении",
+              "evidence": [
+                {
+                  "fragment_id": "f-57697",
+                  "matches": [
+                    {
+                      "start": 57699,
+                      "end": 57789
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-84734bde53f798a8"
+        },
+        {
+          "description": "Выдать Заявителю документы о предоставлении земельного участка без проведения торгов",
+          "evidence": [
+            {
+              "fragment_id": "f-58074",
+              "matches": [
+                {
+                  "start": 58074,
+                  "end": 58162
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-59202",
+              "matches": [
+                {
+                  "start": 59202,
+                  "end": 59290
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [
+            {
+              "text": "Документы о предоставлении земельного участка без проведения торгов, выданные Заявителю",
+              "evidence": [
+                {
+                  "fragment_id": "f-58074",
+                  "matches": [
+                    {
+                      "start": 58074,
+                      "end": 58162
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-a73a4a6ea8cabb2e"
+        },
+        {
+          "description": "Исправить допущенные опечатки и ошибки в выданных документах",
+          "evidence": [
+            {
+              "fragment_id": "f-58163",
+              "matches": [
+                {
+                  "start": 58163,
+                  "end": 58350
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-59291",
+              "matches": [
+                {
+                  "start": 59291,
+                  "end": 59478
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Документы, выданные в результате предоставления государственной услуги",
+              "evidence": [
+                {
+                  "fragment_id": "f-58163",
+                  "matches": [
+                    {
+                      "start": 58277,
+                      "end": 58350
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-8067248f8460ec26"
+        },
+        {
+          "description": "Направить информацию об отсутствии опечаток и ошибок в выданных документах",
+          "evidence": [
+            {
+              "fragment_id": "f-58163",
+              "matches": [
+                {
+                  "start": 58216,
+                  "end": 58350
+                }
+              ]
+            },
+            {
+              "fragment_id": "f-59291",
+              "matches": [
+                {
+                  "start": 59344,
+                  "end": 59478
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [
+            {
+              "text": "Информация об отсутствии опечаток и ошибок в выданных документах",
+              "evidence": [
+                {
+                  "fragment_id": "f-58163",
+                  "matches": [
+                    {
+                      "start": 58228,
+                      "end": 58350
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-8634eb2405e9dc49"
+        }
+      ]
+    },
+    {
+      "id": "procedure-c-60229",
+      "title": "Прием, регистрация и отказ в приеме Заявительных документов",
+      "title_variants": [
+        "Прием и регистрация Заявительных документов, отказ в приеме"
+      ],
+      "anchor_evidence": [
+        {
+          "fragment_id": "f-60229",
+          "matches": [
+            {
+              "start": 60229,
+              "end": 60418
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "description": "Принять Заявительные документы",
+          "evidence": [
+            {
+              "fragment_id": "f-60420",
+              "matches": [
+                {
+                  "start": 60420,
+                  "end": 60540
+                }
+              ]
+            }
+          ],
+          "actor": {
+            "text": "Должностное лицо структурного подразделения, ответственного за работу с Заявителями",
+            "evidence": [
+              {
+                "fragment_id": "f-60420",
+                "matches": [
+                  {
+                    "start": 60420,
+                    "end": 60540
+                  }
+                ]
+              }
+            ]
+          },
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Заявительные документы",
+              "evidence": [
+                {
+                  "fragment_id": "f-60420",
+                  "matches": [
+                    {
+                      "start": 60420,
+                      "end": 60540
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [],
+          "dependencies": [
+            {
+              "text": "Представление Заявителем Заявительных документов в соответствии с указанными в регламенте требованиями",
+              "evidence": [
+                {
+                  "fragment_id": "f-60229",
+                  "matches": [
+                    {
+                      "start": 60229,
+                      "end": 60418
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "id": "action-9a73e5889b74bd7d"
+        },
+        {
+          "description": "Принять Заявительные документы",
+          "evidence": [
+            {
+              "fragment_id": "f-60420",
+              "matches": [
+                {
+                  "start": 60420,
+                  "end": 60540
+                }
+              ]
+            }
+          ],
+          "actor": {
+            "text": "Должностное лицо структурного подразделения, ответственного за работу с Заявителями",
+            "evidence": [
+              {
+                "fragment_id": "f-60420",
+                "matches": [
+                  {
+                    "start": 60455,
+                    "end": 60539
+                  }
+                ]
+              }
+            ]
+          },
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Заявительные документы",
+              "evidence": [
+                {
+                  "fragment_id": "f-60420",
+                  "matches": [
+                    {
+                      "start": 60420,
+                      "end": 60442
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [],
+          "dependencies": [
+            {
+              "text": "Представление Заявителем Заявительных документов",
+              "evidence": [
+                {
+                  "fragment_id": "f-60229",
+                  "matches": [
+                    {
+                      "start": 60234,
+                      "end": 60418
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "id": "action-be9e6c550d931b36"
+        },
+        {
+          "description": "Автоматически провести форматно-логическую проверку электронного заявления и оснований для отказа в приеме",
+          "evidence": [
+            {
+              "fragment_id": "f-60956",
+              "matches": [
+                {
+                  "start": 60956,
+                  "end": 61179
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Заявление в электронной форме",
+              "evidence": [
+                {
+                  "fragment_id": "f-60956",
+                  "matches": [
+                    {
+                      "start": 60956,
+                      "end": 61077
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [
+            {
+              "text": "Получение заявления в электронной форме",
+              "evidence": [
+                {
+                  "fragment_id": "f-60956",
+                  "matches": [
+                    {
+                      "start": 60956,
+                      "end": 60999
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependencies": [],
+          "id": "action-1b680ebbcc459be0"
+        },
+        {
+          "description": "Автоматически провести форматно-логическую проверку электронного заявления и оснований для отказа в приеме",
+          "evidence": [
+            {
+              "fragment_id": "f-60956",
+              "matches": [
+                {
+                  "start": 60956,
+                  "end": 61179
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Заявление в электронной форме",
+              "evidence": [
+                {
+                  "fragment_id": "f-60956",
+                  "matches": [
+                    {
+                      "start": 60956,
+                      "end": 60999
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [
+            {
+              "text": "Получено заявление в электронной форме",
+              "evidence": [
+                {
+                  "fragment_id": "f-60956",
+                  "matches": [
+                    {
+                      "start": 60956,
+                      "end": 60999
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependencies": [],
+          "id": "action-aceadc34c5efaaab"
+        }
+      ]
+    },
+    {
+      "id": "procedure-c-79067",
+      "title": "Исправление опечаток и ошибок либо направление информации об их отсутствии",
+      "title_variants": [],
+      "anchor_evidence": [
+        {
+          "fragment_id": "f-79067",
+          "matches": [
+            {
+              "start": 79067,
+              "end": 79417
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "description": "Исправить опечатки и ошибки в документах, выданных при предоставлении государственной услуги.",
+          "evidence": [
+            {
+              "fragment_id": "f-80872",
+              "matches": [
+                {
+                  "start": 80879,
+                  "end": 81096
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Выданные документы с допущенными опечатками и ошибками.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 80927,
+                      "end": 81096
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "text": "Исправленные опечатки и ошибки в выданных документах.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 80879,
+                      "end": 81096
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [
+            {
+              "text": "Общий срок процедуры — не более 10 календарных дней с даты регистрации обращения.",
+              "evidence": [
+                {
+                  "fragment_id": "f-79418",
+                  "matches": [
+                    {
+                      "start": 79418,
+                      "end": 79653
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependencies": [],
+          "id": "action-055433483d0430cd"
+        },
+        {
+          "description": "Направить Заявителю ответ об отсутствии опечаток и ошибок в выданных документах.",
+          "evidence": [
+            {
+              "fragment_id": "f-80872",
+              "matches": [
+                {
+                  "start": 81102,
+                  "end": 81264
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [
+            {
+              "text": "Заявителю направлен ответ с информацией об отсутствии опечаток и ошибок.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 81102,
+                      "end": 81264
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [
+            {
+              "text": "Альтернативный результат процедуры вместо исправления опечаток и ошибок.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 80879,
+                      "end": 81264
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "text": "Общий срок процедуры — не более 10 календарных дней с даты регистрации обращения.",
+              "evidence": [
+                {
+                  "fragment_id": "f-79418",
+                  "matches": [
+                    {
+                      "start": 79418,
+                      "end": 79653
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "dependencies": [
+            {
+              "text": "Процедура начинается по обращению Заявителя об исправлении опечаток и ошибок с подтверждающими документами.",
+              "evidence": [
+                {
+                  "fragment_id": "f-79067",
+                  "matches": [
+                    {
+                      "start": 79072,
+                      "end": 79417
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "id": "action-8058d42dbbe7be2c"
+        }
+      ]
+    },
+    {
+      "id": "procedure-c-80872",
+      "title": "Исправление опечаток и ошибок в выданных документах",
+      "title_variants": [],
+      "anchor_evidence": [
+        {
+          "fragment_id": "f-80872",
+          "matches": [
+            {
+              "start": 80879,
+              "end": 81264
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "description": "Исправить опечатки и ошибки в выданных документах.",
+          "evidence": [
+            {
+              "fragment_id": "f-80872",
+              "matches": [
+                {
+                  "start": 80879,
+                  "end": 81096
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Документы, выданные в результате предоставления государственной услуги.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 81024,
+                      "end": 81096
+                    },
+                    {
+                      "start": 81191,
+                      "end": 81263
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-d5674a64bdc768c4"
+        },
+        {
+          "description": "Направить заявителю ответ об отсутствии опечаток и ошибок.",
+          "evidence": [
+            {
+              "fragment_id": "f-80872",
+              "matches": [
+                {
+                  "start": 81097,
+                  "end": 81264
+                }
+              ]
+            }
+          ],
+          "actor": null,
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [],
+          "outputs": [
+            {
+              "text": "Ответ заявителю с информацией об отсутствии опечаток и ошибок в выданных документах.",
+              "evidence": [
+                {
+                  "fragment_id": "f-80872",
+                  "matches": [
+                    {
+                      "start": 81102,
+                      "end": 81264
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [],
+          "dependencies": [],
+          "id": "action-e16c7c8956e7b0c8"
+        }
+      ]
+    },
+    {
+      "id": "procedure-c-95555",
+      "title": "Прием документов либо отказ в их приеме в многофункциональном центре",
+      "title_variants": [
+        "Прием документов в многофункциональном центре"
+      ],
+      "anchor_evidence": [
+        {
+          "fragment_id": "f-95555",
+          "matches": [
+            {
+              "start": 95555,
+              "end": 95760
+            }
+          ]
+        },
+        {
+          "fragment_id": "f-96916",
+          "matches": [
+            {
+              "start": 96916,
+              "end": 97107
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "description": "Принять документы, представленные заявителем или представителем.",
+          "evidence": [
+            {
+              "fragment_id": "f-95761",
+              "matches": [
+                {
+                  "start": 95761,
+                  "end": 95897
+                }
+              ]
+            }
+          ],
+          "actor": {
+            "text": "Специалисты многофункционального центра",
+            "evidence": [
+              {
+                "fragment_id": "f-95761",
+                "matches": [
+                  {
+                    "start": 95840,
+                    "end": 95897
+                  }
+                ]
+              }
+            ]
+          },
+          "requires_review": true,
+          "validation": "exact_quote_match_only",
+          "review_reasons": [],
+          "inputs": [
+            {
+              "text": "Документы, предусмотренные пунктами 2.8 - 2.12 Административного регламента.",
+              "evidence": [
+                {
+                  "fragment_id": "f-95761",
+                  "matches": [
+                    {
+                      "start": 95761,
+                      "end": 95838
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "text": "Принятые документы.",
+              "evidence": [
+                {
+                  "fragment_id": "f-97477",
+                  "matches": [
+                    {
+                      "start": 97477,
+                      "end": 97648
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "conditions": [],
+          "dependencies": [
+            {
+              "text": "Представление документов заявителем или представителем в многофункциональный центр.",
+              "evidence": [
+                {
+                  "fragment_id": "f-95555",
+                  "matches": [
+                    {
+                      "start": 95560,
+                      "end": 95760
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "id": "action-b24087c749856e83"
+        }
+      ]
+    }
+  ]
+}

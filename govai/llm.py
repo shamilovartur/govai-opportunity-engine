@@ -78,13 +78,26 @@ class OpenAIProvider:
         self.client.close()
 
     def extract(self, payload: dict) -> Candidates:
+        result, _ = self.structured(payload, instructions=INSTRUCTIONS, schema=Candidates,
+                                    schema_name='administrative_processes', max_output_tokens=12000)
+        return result
+
+    def structured(self, payload, *, instructions, schema, schema_name, max_output_tokens, retries=None,
+                   compact=False, request_timeout=None):
+        options = {}
+        if retries is not None:
+            options['max_retries'] = retries
+        if request_timeout is not None:
+            options['timeout'] = request_timeout
+        client = self.client.with_options(**options) if options else self.client
+        self.last_usage = None
         try:
-            response = self.client.responses.create(
-                model=self.model, instructions=INSTRUCTIONS,
-                input=json.dumps(payload, ensure_ascii=False),
-                text={"format": {"type": "json_schema", "name": "administrative_processes",
-                                 "schema": Candidates.model_json_schema(), "strict": True}},
-                max_output_tokens=12000, store=False, truncation='disabled',
+            response = client.responses.create(
+                model=self.model, instructions=instructions,
+                input=json.dumps(payload, ensure_ascii=False, separators=(',', ':') if compact else None),
+                text={"format": {"type": "json_schema", "name": schema_name,
+                                 "schema": schema.model_json_schema(), "strict": True}},
+                max_output_tokens=max_output_tokens, store=False, truncation='disabled',
             )
         except APITimeoutError as exc:
             raise ProcessError("Превышено время ожидания OpenAI. Повторите попытку позже.") from exc
@@ -103,9 +116,13 @@ class OpenAIProvider:
                                "Ошибка сервиса OpenAI. Повторите попытку позже.")) from exc
         except APIError as exc:
             raise ProcessError("OpenAI вернул некорректный ответ API. Повторите попытку позже.") from exc
+        usage = getattr(response, 'usage', None)
+        tokens = {k: getattr(usage, k) for k in ('input_tokens', 'output_tokens', 'total_tokens')
+                  if type(getattr(usage, k, None)) is int and getattr(usage, k) >= 0}
+        self.last_usage = tokens or None
         if getattr(response, 'status', None) != 'completed':
             raise ProcessError("OpenAI вернул незавершённый ответ (возможен лимит вывода). "
-                               "Уменьшите размер блоков или проверьте модель.")
+                               "Проверьте лимит ответа и настройки текущего этапа.")
         output = getattr(response, 'output', None)
         if not isinstance(output, list):
             raise ProcessError("OpenAI вернул ответ без содержимого.")
@@ -113,6 +130,21 @@ class OpenAIProvider:
                for item in output for part in (getattr(item, 'content', None) or [])):
             raise ProcessError("Модель отказалась обрабатывать этот блок. Результат не подменён.")
         try:
-            return Candidates.model_validate_json(response.output_text)
+            result = schema.model_validate_json(response.output_text)
         except (ValidationError, ValueError, TypeError, AttributeError) as exc:
             raise ProcessError("OpenAI вернул пустой ответ или JSON, не соответствующий схеме.") from exc
+        return result, tokens or None
+
+
+class OpenAINormalizer(OpenAIProvider):
+    from govai.normalization import PROMPT_VERSION as prompt_version, PROMPT_SHA256 as prompt_sha256
+
+    def normalize(self, payload, *, max_output_tokens):
+        from govai.normalization import INSTRUCTIONS as NORMALIZATION_INSTRUCTIONS, NormalizationPlan
+        try:
+            return self.structured(payload, instructions=NORMALIZATION_INSTRUCTIONS, schema=NormalizationPlan,
+                                   schema_name='process_normalization_plan', max_output_tokens=max_output_tokens,
+                                   retries=0, compact=True, request_timeout=300)
+        except ProcessError as exc:
+            exc.usage = self.last_usage
+            raise

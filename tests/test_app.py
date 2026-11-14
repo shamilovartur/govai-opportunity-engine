@@ -11,6 +11,15 @@ from govai.url_input import URLInputError, _html_document
 APP = Path(__file__).resolve().parents[1] / "app.py"
 
 
+def technical(app, fragments=False):
+    view = next((r for r in app.radio if r.label == 'Раздел приложения'), None)
+    if view:
+        view.set_value('Технические данные').run(timeout=15)
+        if fragments:
+            next(c for c in app.checkbox if c.label == 'Показать фрагменты и ссылки на пункты').check().run(timeout=15)
+    return app
+
+
 def run_with_upload(filename, data):
     # AppTest does not expose file-uploader interaction. Supply only the upload;
     # the actual parser and all rendered app elements run unchanged.
@@ -19,7 +28,7 @@ def run_with_upload(filename, data):
         FileURLs(),
     )
     with patch("streamlit.file_uploader", return_value=upload):
-        return AppTest.from_file(str(APP)).run(timeout=15)
+        return technical(AppTest.from_file(str(APP)).run(timeout=15), fragments=True)
 
 
 def test_initial_screen():
@@ -70,7 +79,7 @@ def test_real_npa_structure_is_visible():
     sample = APP.parent / 'examples/rosimushchestvo_261/source.txt'
     app = run_with_upload('source.txt', sample.read_bytes())
     assert not app.exception
-    assert app.subheader[0].value == 'Структура документа'
+    assert any(h.value == 'Структура документа' for h in app.subheader)
     rendered = '\n'.join(item.value for item in app.markdown)
     assert 'Номер: 261' in rendered
     assert 'Редакция: 2023-05-30' in rendered
@@ -100,6 +109,7 @@ def test_url_mode_loads_html_and_does_not_refetch_on_rerun():
     with patch('govai.url_input.extract_url_document', return_value=url_result()) as fetch:
         app.button[0].click().run()
         assert not app.exception
+        technical(app)
         assert 'Заявитель направляет заявление' in app.text_area[0].value
         assert 'Полнота НПА автоматически не подтверждена' in app.warning[0].value
         assert len(app.get('download_button')) == 1
@@ -113,6 +123,7 @@ def test_url_change_and_failed_retry_clear_old_document():
     app.text_input[0].set_value('https://public.example.org/doc').run()
     with patch('govai.url_input.extract_url_document', return_value=url_result()):
         app.button[0].click().run()
+    technical(app)
     assert app.text_area
     app.text_input[0].set_value('https://public.example.org/other').run()
     assert not app.text_area
