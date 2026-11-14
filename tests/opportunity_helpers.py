@@ -6,11 +6,16 @@ from govai.opportunities import OpportunityPlan
 from test_normalization import real_case, simple_case, node, plan_for, Normalizer, ACCEPT, FIX, NO_ERROR
 
 
-def map_case(incomplete=False):
+def map_case(incomplete=False, *, classified=False):
     doc, raw, analysis = real_case()
     nodes = [node(analysis, ACCEPT, key='receipt', process='intake', title='Принять заявительные документы'),
              node(analysis, FIX, key='correction', process='errors', title='Исправить опечатки и ошибки'),
              node(analysis, NO_ERROR, key='answer', process='errors', title='Подготовить ответ об отсутствии ошибки')]
+    if classified:
+        # Only receipt has a surviving actor in this real fixture. Do not invent
+        # actors for correction/answer, whose original extracted actor is null.
+        nodes[0].update(participant='agency', participant_refs=list(dict.fromkeys(
+            ref for sid in ACCEPT for ref in analysis.actions[sid]['actor']['refs'])))
     used = set(ACCEPT + FIX + NO_ERROR)
     if not incomplete:
         for i, sid in enumerate(analysis.actions):
@@ -21,12 +26,22 @@ def map_case(incomplete=False):
     return doc, raw, analysis, normalized
 
 
-def simple_map(lines=('Специалист анализирует заявление и готовит проект ответа.',)):
-    doc, raw, analysis = simple_case(lines)
+def simple_map(lines=('Специалист анализирует заявление и готовит проект ответа.',), *, actors=None, participants=None):
+    doc, raw, analysis = simple_case(lines, actors=actors)
     nodes = [node(analysis, [sid], key=f'op-{i}', process=f'proc-{i}', title=a['description'])
              for i, (sid, a) in enumerate(analysis.actions.items())]
+    if participants is not None:
+        assert actors is not None and len(participants) == len(nodes)
+        for row, category, source in zip(nodes, participants, analysis.actions.values()):
+            row.update(participant=category, participant_refs=source['actor']['refs'] if source['actor'] else [])
     normalized = normalize_analysis(analysis, Normalizer(plan_for(analysis, nodes)))
     return doc, raw, analysis, normalized
+
+
+def agency_map():
+    """Synthetic positive measurement fixture with explicit agency actor evidence."""
+    return simple_map(('Специалист ведомства анализирует заявление и готовит проект ответа.',),
+                      actors=('Специалист ведомства',), participants=('agency',))
 
 
 def prospect_assessment(**changes):
@@ -57,7 +72,10 @@ def measurement(normalized, aids, model='labor_time', **changes):
         'primary': {'category': category, 'name': name, 'unit': unit}, 'secondary': None,
         'method': 'Сравнить контрольную обработку и работу с ИИ на одинаковых обезличенных материалах; эксперт проверяет результат.',
         'success_criterion': 'Проверенный результат без дополнительных существенных ошибок при меньших трудозатратах.',
-        'human_review_included': True, 'time_scenarios': []}
+        'human_review_included': True, 'time_scenarios': [],
+        'quality_protocol': {'calculation': 'Число выводов с корректным подтверждением, делённое на все проверяемые выводы контрольной выборки.',
+            'expert_reference': 'Два независимых эксперта размечают источники и выводы; расхождения разрешаются до слепого сравнения.',
+            'unacceptable_errors': 'Не допускаются неподтверждённые юридические выводы или пропуск существенных доводов.'} if model == 'qualitative' else None}
     value.update(changes)
     return value
 
@@ -70,7 +88,9 @@ def labor_assumptions():
         ('optimistic', '20', '10', 'Однотипный читаемый комплект, но источники и проект всё равно проверяет специалист.')]:
         rows.append({'name': name, 'rationale': note, **{key: {
             'value': value, 'origin': 'illustrative', 'unit': 'minutes/case',
-            'note': note, 'evidence_refs': []} for key, value in [('before_minutes', before), ('after_minutes', after)]}})
+            'note': ('Специалист самостоятельно читает комплект, сопоставляет сведения и готовит проект ответа. ' if key == 'before_minutes'
+                     else 'Модель извлекает сведения и предлагает проект; специалист сверяет источники, исправляет и утверждает проект. ') + note,
+            'evidence_refs': []} for key, value in [('before_minutes', before), ('after_minutes', after)]}})
     return rows
 
 

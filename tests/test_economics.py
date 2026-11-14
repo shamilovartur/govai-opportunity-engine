@@ -252,3 +252,147 @@ def test_new_effect_stage_validates_annual_scenarios_even_if_financial_scope_is_
     for i in (1,2): cases[i]['parameters']=deepcopy(cases[0]['parameters'])
     with pytest.raises(ProcessError,match='различаться'):
         assess_effect('time_capacity',scenarios=cases)
+
+
+def _participant_case(categories=('agency', 'organization', 'applicant', 'unknown', 'system')):
+    """Explicitly sourced actors; labels are a test plan, not inferred production rules."""
+    from test_normalization import simple_case, node, plan_for, Normalizer
+    from govai.normalization import normalize_analysis
+    lines = ('Специалист ведомства сопоставляет сведения в заявлении.',
+             'Специалист МФЦ сопоставляет сведения в заявлении.',
+             'Заявитель проверяет содержание своего заявления.',
+             'Сведения сопоставляются перед подготовкой проекта.',
+             'Информационная система автоматически проверяет заполнение поля.')
+    actors = ('Специалист ведомства', 'Специалист МФЦ', 'Заявитель', None, 'Информационная система')
+    _, _, analysis = simple_case(lines, actors=actors)
+    nodes = []
+    for i, (sid, source) in enumerate(analysis.actions.items()):
+        nodes.append(node(analysis, [sid], key=f'actor-{i}', process=f'process-{i}',
+                          participant=categories[i], participant_refs=source['actor']['refs'] if source['actor'] else []))
+    normalized = normalize_analysis(analysis, Normalizer(plan_for(analysis, nodes)))
+    return analysis, normalized
+
+
+def test_measured_applicant_time_keeps_its_own_participant_and_cannot_become_agency_money():
+    from govai.opportunities import measurement_participant, economic_restrictions
+    _, normalized = _participant_case(); m = normalized['map']
+    aid = 'actor-2'; source_ids = next(a['source_action_ids'] for a in m['actions'] if a['id'] == aid)
+    participant = measurement_participant(m, source_ids)
+    assert participant['category'] == 'applicant' and 'заявителя' in participant['label']
+    assert participant['actors'] == ['Заявитель'] and not participant['limitations']
+    assert aid not in economic_restrictions(m, measured_sources=source_ids, model='labor_time')
+    assert any('заявителя' in reason for reason in economic_restrictions(
+        m, measured_sources=source_ids, model='time_capacity')[aid])
+
+
+def test_agency_and_mfc_are_distinct_and_mixed_labor_requires_source_boundary():
+    from govai.opportunities import measurement_participant, economic_restrictions
+    _, normalized = _participant_case(); m = normalized['map']
+    nodes = {a['id']: a for a in m['actions']}
+    agency, mfc = nodes['actor-0']['source_action_ids'], nodes['actor-1']['source_action_ids']
+    assert measurement_participant(m, agency)['category'] == 'agency'
+    assert measurement_participant(m, mfc)['category'] == 'organization'
+    assert 'МФЦ' in measurement_participant(m, mfc)['label']
+    assert measurement_participant(m, agency + mfc)['category'] == 'mixed'
+    blocked = economic_restrictions(m, measured_sources=agency + mfc, model='labor_time')
+    assert set(blocked) == {'actor-0', 'actor-1'}
+    assert all(any('разграничить' in reason for reason in reasons) for reasons in blocked.values())
+    assert not economic_restrictions(m, measured_sources=agency, model='labor_time')
+    assert not economic_restrictions(m, measured_sources=mfc, model='labor_time')
+
+
+def test_unknown_actor_or_unclassified_review_is_not_invented_as_agency_work():
+    from govai.opportunities import measurement_participant, economic_restrictions
+    _, normalized = _participant_case(); m = normalized['map']
+    nodes = {a['id']: a for a in m['actions']}
+    missing = nodes['actor-3']['source_action_ids']
+    assert measurement_participant(m, missing)['category'] == 'unknown'
+    assert 'actor-3' in economic_restrictions(m, measured_sources=missing, model='labor_time')
+    # Even an explicit actor title does not establish an absent participant classification.
+    nodes['actor-0'].update(kind='review', participant='unknown', participant_refs=[])
+    review = nodes['actor-0']['source_action_ids']
+    assert measurement_participant(m, review)['actors'] == ['Специалист ведомства']
+    assert measurement_participant(m, review)['category'] == 'unknown'
+    assert 'actor-0' in economic_restrictions(m, measured_sources=review, model='labor_time')
+    # It still remains available for qualitative hypotheses and elapsed-time measurement.
+    from govai.opportunities import operational_action_ids
+    assert 'actor-0' in operational_action_ids(m)
+    assert 'actor-0' not in economic_restrictions(m, measured_sources=review, model='qualitative')
+
+
+def test_system_operation_is_not_employee_time_and_invalid_actor_source_is_rejected():
+    from govai.opportunities import measurement_participant, economic_restrictions
+    _, normalized = _participant_case(); m = normalized['map']
+    source_ids = next(a['source_action_ids'] for a in m['actions'] if a['id'] == 'actor-4')
+    assert measurement_participant(m, source_ids)['category'] == 'system'
+    limits = economic_restrictions(m, measured_sources=source_ids, model='labor_time')['actor-4']
+    assert any('человеческого рабочего времени' in text for text in limits)
+    assert any('автоматизацию' in text for text in limits)
+    with pytest.raises(ProcessError): measurement_participant(m, ['nonexistent'])
+    with pytest.raises(ProcessError): measurement_participant(m, source_ids * 2)
+
+
+def test_standardized_thousand_case_illustration_is_not_an_actual_workload():
+    source = effect_case(before_minutes='20', after_minutes='12')
+    original = deepcopy(source)
+    result = calculate_effect_scenario('labor_time', source)
+    sample = result['results']['standardized_hours']
+    assert sample['value'] == '133.33'
+    assert sample['unit'] == 'hours/1000_eligible_cases'
+    assert sample['formula'] == '1000 * saved_minutes / 60'
+    assert sample['basis'] == {'value': '1000', 'unit': 'cases', 'origin': 'illustrative',
+        'population': 'eligible_cases',
+        'note': 'Условная единица сравнения, не фактическая нагрузка и не годовой объём.'}
+    assert result['results']['released_hours']['value'] is None
+    assert result['parameters']['case_count']['value'] is None
+    assert not {'annual_cases', 'hour_cost', 'applicability'} & result['parameters'].keys()
+    assert source == original
+    # An explicitly supplied sample remains separate from the standardized unit.
+    source['parameters']['case_count'] = effect_case(case_count='200')['parameters']['case_count']
+    result = calculate_effect_scenario('labor_time', source)
+    assert result['results']['released_hours']['value'] == '26.67'
+    assert result['results']['standardized_hours']['value'] == '133.33'
+
+
+def test_standardized_all_case_illustration_needs_applicability_and_never_defaults_to_full_coverage():
+    source = effect_case(before_minutes='20', after_minutes='12')
+    unknown = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert unknown['results']['standardized_hours']['value'] is None
+    assert unknown['results']['saved_minutes']['value'] is None
+    assert unknown['missing_parameters'] == ['applicability']
+    source['parameters']['applicability'] = effect_case(applicability='0.25')['parameters']['applicability']
+    result = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert result['results']['saved_minutes']['value'] == '2.00'
+    sample = result['results']['standardized_hours']
+    assert sample['value'] == '33.33' and sample['unit'] == 'hours/1000_all_cases'
+    assert sample['basis']['population'] == 'all_cases'
+    assert result['results']['released_hours']['value'] is None
+    # Applying the same share to an already eligible population remains invalid.
+    with pytest.raises(ProcessError): calculate_effect_scenario('labor_time', source)
+
+
+def test_standardized_illustration_preserves_negative_effect_and_is_separate_from_observed_values():
+    result = calculate_effect_scenario('labor_time', effect_case(origin='user', before_minutes='8', after_minutes='12'))
+    assert result['status'] == 'conditional_estimate'
+    assert result['results']['standardized_hours']['value'] == '-66.67'
+    assert result['results']['standardized_hours']['basis']['origin'] == 'illustrative'
+    assert all(p['origin'] == 'user' for k, p in result['parameters'].items() if k != 'case_count')
+    assert result['budget_savings'] is None and 'отрицательный эффект' in result['warnings'][-1]
+    elapsed = calculate_effect_scenario('elapsed_time', effect_case(before_elapsed_minutes='20', after_elapsed_minutes='12'))
+    assert 'standardized_hours' not in elapsed['results']
+
+
+def test_eligible_minutes_remain_known_without_all_case_applicability_but_do_not_imply_coverage():
+    source = effect_case(before_minutes='20', after_minutes='12')
+    result = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert result['results']['eligible_saved_minutes'] == {
+        'value': '8.00', 'unit': 'minutes/eligible_case', 'formula': 'before_minutes - after_minutes'}
+    assert result['status'] == 'needs_data' and result['missing_parameters'] == ['applicability']
+    assert result['results']['saved_minutes']['value'] is None
+    assert result['results']['standardized_hours']['value'] is None
+    assert result['results']['released_hours']['value'] is None
+    source['parameters']['applicability'] = effect_case(applicability='0.25')['parameters']['applicability']
+    result = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert result['results']['eligible_saved_minutes']['value'] == '8.00'
+    assert result['results']['saved_minutes']['value'] == '2.00'
+    assert result['results']['standardized_hours']['value'] == '33.33'

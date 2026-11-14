@@ -13,7 +13,7 @@ from govai.opportunities import (OpportunityPlan, OpportunityError, OpportunityS
     restore_opportunities, prepare_request, economic_restrictions, operational_action_ids, compact_input)
 from govai.opportunity_report import render_markdown, assess_prospects
 from govai.processes import ProcessError, Candidates, extract_processes
-from opportunity_helpers import map_case, simple_map, proposal, three_proposals, OpportunityMock, supplied_scenarios, prospect_assessment
+from opportunity_helpers import map_case, simple_map, agency_map, proposal, three_proposals, OpportunityMock, supplied_scenarios, prospect_assessment
 from test_normalization import Normalizer, node, plan_for
 
 
@@ -43,7 +43,7 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
     for heading in ['Резюме для руководителя','Сравнение AI-инициатив','Перспективные направления для первых пилотов','Ожидаемый эффект и предпосылки оценки','Приложение с источниками']:
         assert heading in text
     assert '270.00' not in text and '270 000' not in text
-    assert '— измерить' in text and '| Сценарий |' not in text
+    assert 'требуется измерение на пилоте' in text and '| Сценарий |' not in text
     assert '**Основание:**' in text and '**Критерий:**' in text and 'Для расчёта нужны:' in text
     assert '/100' not in text and 'балл' not in text.casefold() and 'Токены' not in text
     assert result['report']['portfolio']['total_budget_savings'] is None
@@ -67,7 +67,7 @@ def test_incomplete_map_preserves_warning_and_blocks_disputed_action_as_financia
 
 
 @pytest.mark.parametrize('fault', ['action','source','evidence','foreign_evidence','relationship','duplicate_id'])
-def test_bad_ids_and_invalid_plans_fail_before_any_report(fault):
+def test_source_faults_are_quarantined_but_global_integrity_failures_stop_report(fault):
     _,_,a,n=simple_map(('Специалист готовит проект ответа.','Специалист проверяет документ.'))
     p=proposal(n,['op-0']); rel=[]
     if fault=='action': p['action_ids']=['fake']
@@ -76,14 +76,21 @@ def test_bad_ids_and_invalid_plans_fail_before_any_report(fault):
     elif fault=='foreign_evidence': p['evidence_refs']=n['map']['actions'][1]['evidence_refs']
     elif fault=='relationship': rel=[{'left':'pilot','right':'missing','relation':'complementary','reason':'wrong'}]
     rows=[p,p] if fault=='duplicate_id' else [p]
-    with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(*rows,relationships=rel)))
+    if fault in ('source','duplicate_id'):
+        with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(*rows,relationships=rel)))
+    elif fault=='relationship':
+        report=generate_opportunities(n,a,OpportunityMock(plan(*rows,relationships=rel)))['report']
+        assert report['initiatives'] and any('связи' in w for w in report['warnings'])
+        assert report['portfolio']['total_released_hours'] is None
+    else:
+        report=generate_opportunities(n,a,OpportunityMock(plan(*rows,relationships=rel)))['report']
+        assert not report['initiatives'] and report['rejected'][0]['origin']=='integrity_validator'
 
 
 @pytest.mark.parametrize('change,reason', [({'task_type':'deterministic'},'обычной автоматизации'),
     ({'ai_necessity':'unnecessary'},'обычной автоматизации'),
     ({'human_approval_required':False},'человеком'),
-    ({'novelty':'duplicates_existing'},'Уже предусмотренная'),
-    ({'ai_necessity':'uncertain'},'не обосновано')])
+    ({'novelty':'duplicates_existing'},'Уже предусмотренная')])
 def test_rejected_scenarios_are_kept_with_reasons(change,reason):
     _,_,a,n=simple_map()
     r=generate_opportunities(n,a,OpportunityMock(plan(proposal(n,**change))))['report']
@@ -158,7 +165,7 @@ def test_preflight_limits_stop_without_truncation_or_calls():
 
 
 def test_restore_recomputes_grounding_finances_and_prospects_without_calls():
-    _,_,a,n=map_case(); provider=OpportunityMock(three_proposals(n))
+    _,_,a,n=map_case(classified=True); provider=OpportunityMock(three_proposals(n))
     saved=generate_opportunities(n,a,provider,scenario_inputs={'documents':supplied_scenarios()})
     restored=restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')
     assert restored==saved and len(provider.calls)==1
@@ -176,16 +183,20 @@ def test_restore_recomputes_grounding_finances_and_prospects_without_calls():
 
 
 def test_user_premises_have_provenance_and_normative_deadline_is_not_work_time():
-    _,_,a,n=map_case(); provider=OpportunityMock(three_proposals(n))
-    r=generate_opportunities(n,a,provider,scenario_inputs={'correction-help':supplied_scenarios()})
-    supplied=next(x for x in r['report']['initiatives'] if x['id']=='correction-help')
+    _,_,a,n=map_case(classified=True); provider=OpportunityMock(three_proposals(n))
+    r=generate_opportunities(n,a,provider,scenario_inputs={'documents':supplied_scenarios()})
+    supplied=next(x for x in r['report']['initiatives'] if x['id']=='documents')
     assert supplied['economics']['status']=='conditional_estimate'
     assert supplied['economics']['scenarios'][1]['budget_savings'] is None
     assert restore_opportunities(json.dumps(r).encode(),n,a,'test-model')==r
     eid=next(e for e,v in a.evidence.items() if '10 календарных дней' in v['quote'])
     bad=supplied_scenarios()
     bad[0]['parameters']['before_minutes'].update(value='10',origin='document',evidence_refs=[eid],note='Подмена срока трудозатратами')
-    with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'correction-help':bad})
+    bad_report=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'correction-help':bad})['report']
+    assert len(bad_report['initiatives']) == 2
+    assert all(i['id'] != 'correction-help' for i in bad_report['initiatives'])
+    # The deadline is a contextual quote, not this measured operation's proof.
+    assert any(r.get('id') == 'correction-help' and 'доказательство' in r['reason'] for r in bad_report['rejected'])
 
 
 def test_unknown_data_and_unknown_money_do_not_automatically_make_a_pilot_low():
@@ -206,8 +217,9 @@ def test_unknown_data_and_unknown_money_do_not_automatically_make_a_pilot_low():
     ('weak','bounded','low'), ('concrete','not_justified','low'),
     ('unclear','bounded','insufficient'), ('concrete','unknown','insufficient')])
 def test_qualitative_rubric_uses_explicit_mechanism_and_pilot_reasons(value_case,pilot_feasibility,expected):
+    _,_,_,normalized=simple_map()
     assessment=prospect_assessment(value_case=value_case,pilot_feasibility=pilot_feasibility)
-    result=assess_prospects([{'prospect_assessment':assessment}],incomplete_input=True)[0]['prospect']
+    result=assess_prospects([proposal(normalized,prospect_assessment=assessment)],incomplete_input=True)[0]['prospect']
     assert result['category']==expected
     assert assessment['value_reason'] in result['reason'] and assessment['pilot_reason'] in result['reason']
     assert all(result[field] for field in ('main_uncertainty','change_condition','pilot','success_criterion'))
@@ -215,7 +227,8 @@ def test_qualitative_rubric_uses_explicit_mechanism_and_pilot_reasons(value_case
 
 
 def test_qualitative_groups_have_no_quota_or_artificial_places():
-    rows=[{'id':key,'prospect_assessment':prospect_assessment(pilot_feasibility='bounded')} for key in ('z','b','a','d')]
+    _,_,_,normalized=simple_map()
+    rows=[{'id':key,**proposal(normalized,prospect_assessment=prospect_assessment(pilot_feasibility='bounded'))} for key in ('z','b','a','d')]
     result=assess_prospects(rows,incomplete_input=True)
     assert [x['id'] for x in result]==['z','b','a','d']
     assert all(x['prospect']['category']=='high' for x in result)
@@ -249,12 +262,13 @@ def test_legal_deadline_number_cannot_become_hour_cost_or_volume():
     for field in ['hour_cost','annual_cases']:
         bad=supplied_scenarios()
         bad[0]['parameters'][field].update(value='10',origin='document',evidence_refs=[eid],note='Неверная интерпретация числа')
-        with pytest.raises(ProcessError):
-            generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'correction-help':bad})
+        report=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'correction-help':bad})['report']
+        assert len(report['initiatives'])==2
+        assert report['rejected'][0]['id']=='correction-help' and report['rejected'][0]['origin']=='integrity_validator'
 
 
 def test_financial_costs_and_incomplete_input_do_not_replace_the_pilot_rubric():
-    _,_,a,n=simple_map()
+    _,_,a,n=agency_map()
     p=proposal(n,prospect_assessment=prospect_assessment(pilot_feasibility='bounded',
         pilot_reason='Только экспертная проверка помощи на ограниченном корпусе, без внедрения в рабочую систему.'))
     values=supplied_scenarios()
@@ -372,8 +386,9 @@ def test_real_automatic_quote_survives_review_with_nonautomatic_candidate_title(
 
 
 def test_unrelated_automation_context_does_not_veto_other_operation():
-    _,_,a,n=simple_map(('Специалист сопоставляет сведения и готовит проект ответа.',
-                        'Система автоматически проверяет заполнение обязательного поля.'))
+    _,_,a,n=simple_map(('Специалист ведомства сопоставляет сведения и готовит проект ответа.',
+                        'Система автоматически проверяет заполнение обязательного поля.'),
+                      actors=('Специалист ведомства', 'Система'), participants=('agency', 'system'))
     p=proposal(n,['op-0'],context_action_ids=['op-1'])
     r=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied_scenarios()})['report']
     assert not r['rejected'] and r['initiatives'][0]['economics']['status']=='conditional_estimate'
@@ -403,7 +418,7 @@ def test_old_opportunity_report_requires_only_report_regeneration():
 
 
 def test_explicit_scenarios_remain_individual_and_partial_unknowns_not_zero():
-    _,_,a,n=map_case(); scenarios=supplied_scenarios()
+    _,_,a,n=map_case(classified=True); scenarios=supplied_scenarios()
     scenarios[1]['parameters']['hour_cost'].update(value=None,origin='unknown',note='Стоимость неизвестна')
     r=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'documents':scenarios})
     rows={i['id']:i for i in r['report']['initiatives']}
@@ -418,7 +433,7 @@ def test_explicit_scenarios_remain_individual_and_partial_unknowns_not_zero():
 
 def test_explicit_individual_illustrative_assumptions_are_preserved_without_spreading():
     from govai.economics import illustrative_scenarios
-    _,_,a,n=map_case()
+    _,_,a,n=map_case(classified=True)
     r=generate_opportunities(n,a,OpportunityMock(three_proposals(n)),scenario_inputs={'documents':illustrative_scenarios()})
     rows={i['id']:i for i in r['report']['initiatives']}
     assert rows['documents']['economics']['status']=='illustrative'
@@ -434,7 +449,8 @@ def test_qualitative_review_hypothesis_cannot_bypass_evidence_checks(fault):
     aids=[x['id'] for x in n['map']['actions']]
     p=proposal(n,[aids[0]],economic_model='qualitative')
     p['evidence_refs']=['invented'] if fault=='unknown' else next(x for x in n['map']['actions'] if x['id']==aids[1])['evidence_refs']
-    with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(p)))
+    report=generate_opportunities(n,a,OpportunityMock(plan(p)))['report']
+    assert not report['initiatives'] and report['rejected'][0]['origin']=='integrity_validator'
 
 
 def test_fields_removed_by_extraction_are_not_reintroduced_as_context():
@@ -484,8 +500,8 @@ def test_received_plan_survives_assembly_error_and_rebuilds_locally(monkeypatch)
     assert result['metrics']['requests']==1  # original paid attempt, not a second request
     assert result['metrics']['usage']==session['plan']['metrics']['usage']
     bad=deepcopy(session['plan']); bad['plan']['proposals'][0]['evidence_refs']=['invented']
-    with pytest.raises(ProcessError,match='доказательства'):
-        generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=bad)
+    checked=generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=bad)['report']
+    assert not checked['initiatives'] and 'доказательства' in checked['rejected'][0]['reason']
     bad_map=deepcopy(n); next(iter(bad_map['map']['evidence'].values()))['quote']='подмена'
     with pytest.raises(ProcessError):
         generate_opportunities(bad_map,a,None,model='test-model',provider_name='openai',saved_plan=session['plan'])
@@ -521,7 +537,7 @@ def test_management_report_translates_internal_diagnostics_and_keeps_sources_sho
 
 def test_llm_time_assumptions_are_individual_hypotheses_not_agency_facts():
     from opportunity_helpers import labor_assumptions
-    _,_,a,n=simple_map()
+    _,_,a,n=agency_map()
     row=proposal(n,economic_model='labor_time',required_parameters=[])
     row['measurement']['time_scenarios']=labor_assumptions()
     original=deepcopy(row)
@@ -542,7 +558,7 @@ def test_llm_time_assumptions_are_individual_hypotheses_not_agency_facts():
 
 def test_explicit_sample_hours_need_neither_salary_nor_annual_workload():
     from opportunity_helpers import labor_assumptions
-    _,_,a,n=simple_map()
+    _,_,a,n=agency_map()
     p=proposal(n,economic_model='labor_time',required_parameters=[])
     p['measurement']['primary']['unit']='hours'
     inputs=[]
@@ -591,10 +607,16 @@ def test_measurement_scope_and_model_numeric_provenance_do_not_bypass_validation
         value=m['time_scenarios'][0]['before_minutes']
         value.update(origin='document' if fault=='claimed_document_measurement' else 'user',
                      evidence_refs=p['evidence_refs'] if fault=='claimed_document_measurement' else [])
-    with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(p)))
+    report=generate_opportunities(n,a,OpportunityMock(plan(p)))['report']
+    if fault in ('unknown_source','foreign_source','repeated_source'):
+        assert not report['initiatives'] and report['rejected'][0]['origin']=='integrity_validator'
+    else:
+        assert report['initiatives'] and not report['rejected']
+        assert report['initiatives'][0]['economics']['status']=='needs_data'
+        assert not report['initiatives'][0]['economics']['scenarios']
 
 
-def test_explicit_part_of_disputed_initiative_can_be_a_labor_experiment_not_confirmed_money():
+def test_explicit_part_of_disputed_initiative_keeps_measurement_but_unknown_actor_blocks_hours():
     from opportunity_helpers import labor_assumptions
     _,_,a,_=simple_map(('Специалист сопоставляет документы.', 'Специалист составляет проект ответа.'))
     n=normalize_analysis(a,Normalizer(plan_for(a,[])))
@@ -608,8 +630,8 @@ def test_explicit_part_of_disputed_initiative_can_be_a_labor_experiment_not_conf
     assert r['report']['normalization_status']=='incomplete' and r['report']['status']=='preliminary'
     assert row['measurement']['partial_initiative'] and row['measurement']['source_action_ids']==measured
     assert row['measurement']['source_limitations'] and row['uncertainties']
-    assert row['economics']['status']=='illustrative'
-    assert row['economics']['scenarios'][1]['results']['saved_minutes']['value']=='8.00'
+    assert row['economics']['status']=='needs_data' and row['economics']['scenarios']==[]
+    assert any('участника' in text for text in row['economics']['reasons'])
     assert row['confidence']['requires_review'] and r['report']['portfolio']['total_budget_savings'] is None
     assert 'составление ответа не измеряется' in render_markdown(r)
     money=proposal(n,aids)
@@ -635,7 +657,7 @@ def test_unjustified_time_forecast_keeps_hypothesis_and_measurement_plan(fault):
 
 def test_negative_labor_scenario_is_not_hidden_or_converted_to_budget_savings():
     from opportunity_helpers import labor_assumptions
-    _,_,a,n=simple_map(); p=proposal(n,economic_model='labor_time')
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
     p['measurement']['time_scenarios']=labor_assumptions()
     for s in p['measurement']['time_scenarios']: s['before_minutes']['value']='8'
     r=generate_opportunities(n,a,OpportunityMock(plan(p)))
@@ -660,3 +682,274 @@ def test_money_on_already_eligible_base_keeps_hypothesis_without_repeated_applic
     assert not r['report']['rejected'] and row['economics']['status']=='needs_data'
     assert row['economics']['scenarios']==[]
     assert any('подходящие случаи нельзя учитывать повторно' in x for x in row['economics']['reasons'])
+
+
+@pytest.mark.parametrize('fault', ['two_scenarios','duplicate_scenarios','unit','blank_note','nan','foreign_evidence'])
+def test_nine_proposals_survive_local_optional_fault_without_loosening_sources(fault):
+    from opportunity_helpers import labor_assumptions
+    _,_,a,n=simple_map(tuple(f'Специалист сопоставляет материалы дела {i} и готовит проект.' for i in range(9)))
+    rows=[proposal(n,[f'op-{i}'],key=f'pilot-{i}',title=f'Проверка материалов вида {i}',economic_model='labor_time') for i in range(9)]
+    rows[0]['measurement']['time_scenarios']=labor_assumptions()
+    cases=rows[0]['measurement']['time_scenarios']
+    if fault=='two_scenarios': cases.pop()
+    elif fault=='duplicate_scenarios':
+        for s in cases: s['after_minutes']['value']='12'
+    elif fault=='unit': cases[0]['after_minutes']['unit']='RUB/year'
+    elif fault=='blank_note': cases[0]['after_minutes']['note']=''
+    elif fault=='nan': cases[0]['after_minutes']['value']='NaN'
+    else: cases[-1]['after_minutes']['evidence_refs']=rows[1]['evidence_refs']
+    provider=OpportunityMock(plan(*rows)); pending=[]
+    saved=generate_opportunities(n,a,provider,on_plan=pending.append)
+    assert len(provider.calls)==1 and pending and len(saved['plan']['proposals'])==9
+    report=saved['report']
+    assert len(report['initiatives'])==(8 if fault=='foreign_evidence' else 9)
+    assert len(report['rejected'])==(1 if fault=='foreign_evidence' else 0)
+    if fault=='foreign_evidence':
+        assert report['rejected'][0]['id']=='pilot-0' and report['rejected'][0]['origin']=='integrity_validator'
+    else:
+        first=next(i for i in report['initiatives'] if i['id']=='pilot-0')
+        assert first['economics']['status']=='needs_data' and not first['economics']['scenarios']
+    assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==saved
+
+
+def test_plan_backup_is_not_report_revalidates_and_rebuilds_without_api(monkeypatch):
+    import govai.opportunities as module
+    _,_,a,n=simple_map(); provider=OpportunityMock(plan(proposal(n))); pending=[]
+    assemble=module.assemble_report
+    monkeypatch.setattr(module,'assemble_report',lambda *args,**kw: (_ for _ in ()).throw(RuntimeError('local failure')))
+    with pytest.raises(OpportunityError): generate_opportunities(n,a,provider,on_plan=pending.append)
+    data=module.export_opportunity_plan(pending[0],n,a,'test-model')
+    assert json.loads(data)['kind']=='govai_opportunity_plan' and 'report' not in json.loads(data)
+    checked=module.restore_opportunity_plan(data,n,a,'test-model')
+    with pytest.raises(ProcessError): restore_opportunities(data,n,a,'test-model')
+    bad=json.loads(data); bad['plan']['proposals'][0]['evidence_refs']=['fake']
+    with pytest.raises(ProcessError): module.restore_opportunity_plan(json.dumps(bad).encode(),n,a,'test-model')
+    with pytest.raises(ProcessError): module.restore_opportunity_plan(data,n,a,'another-model')
+    monkeypatch.setattr(module,'assemble_report',assemble)
+    result=generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=checked)
+    assert result['report']['initiatives'] and len(provider.calls)==1
+
+
+@pytest.mark.parametrize('fault', ['same_notes','same_rationale','no_work','no_human_work','zero_review_time'])
+def test_time_numbers_require_work_explanations_not_just_nonempty_notes(fault):
+    from opportunity_helpers import agency_map, labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    p['measurement']['time_scenarios']=labor_assumptions()
+    cases=p['measurement']['time_scenarios']
+    if fault=='same_notes':
+        for s in cases: s['before_minutes']['note']=s['after_minutes']['note']='Иллюстративная оценка для проверки на пилоте.'
+    elif fault=='same_rationale':
+        for s in cases: s['rationale']='Иллюстративная оценка для проверки на пилоте.'
+    elif fault=='no_work': p['measurement']['work']='Работа'
+    elif fault=='no_human_work': p['human_role']='Неизвестно'
+    else: cases[0]['after_minutes']['value']='0'
+    result=generate_opportunities(n,a,OpportunityMock(plan(p)))
+    row=result['report']['initiatives'][0]
+    assert row['economics']['status']=='needs_data' and not row['economics']['scenarios']
+    assert row['economics']['reasons'] and row['measurement']['method']
+    assert not result['report']['rejected']
+
+
+@pytest.mark.parametrize('fault', ['mechanism','alternative','human','risk','pilot','measurement','quality_protocol'])
+def test_inconsistent_high_prospect_preserves_hypothesis_but_not_high_category(fault):
+    _,_,a,n=simple_map()
+    p=proposal(n,prospect_assessment=prospect_assessment(pilot_feasibility='bounded'))
+    if fault=='mechanism': p['why_ai']=' '
+    elif fault=='alternative': p['non_ai_alternative']=p['why_ai']
+    elif fault=='human': p['human_role']=' '
+    elif fault=='risk': p['risks']=[' ']
+    elif fault=='pilot': p['prospect_assessment']['pilot']=' '
+    elif fault=='measurement': p['measurement']['method']=' '
+    else:
+        from opportunity_helpers import measurement
+        p['measurement']=measurement(n,p['action_ids'],'qualitative',quality_protocol=None)
+    result=generate_opportunities(n,a,OpportunityMock(plan(p)))
+    assert len(result['report']['initiatives'])==1 and not result['report']['rejected']
+    accepted=result['report']['initiatives'][0]
+    assert accepted['prospect']['category']=='insufficient' and accepted['prospect']['assessment_issues']
+    assert accepted['prospect_assessment']['pilot_feasibility']=='bounded'
+    assert 'Обоснованных кандидатов для первого ограниченного пилота пока нет' in render_markdown(result)
+
+
+def test_management_text_keeps_substantive_risk_around_internal_labels():
+    from govai.opportunity_report import business_text
+    source='Не объединено с a98: приём в МФЦ и проверка ведомством имеют разных исполнителей. review: без доступа к оригиналам нельзя проверить правомерность исправления.'
+    actual=business_text(source)
+    assert 'a98' not in actual and 'review' not in actual
+    assert 'приём в МФЦ и проверка ведомством имеют разных исполнителей' in actual
+    assert 'без доступа к оригиналам нельзя проверить правомерность исправления' in actual
+    assert 'границы' in actual.casefold()
+
+
+def test_summary_names_actual_first_pilot_candidates_and_explains_non_ai_alternative():
+    _,_,a,n=map_case()
+    rows=three_proposals(n).model_dump()['proposals']
+    rows[0]['prospect_assessment']=prospect_assessment(pilot_feasibility='bounded')
+    result=generate_opportunities(n,a,OpportunityMock(plan(*rows)))
+    text=render_markdown(result)
+    summary=text.split('## Сравнение AI-инициатив')[0]
+    assert rows[0]['title'] in summary and 'повестка обсуждения' in summary
+    assert rows[1]['title'] not in summary
+    cases=text.split('## Перспективные направления для первых пилотов')[1].split('## Ожидаемый эффект')[0]
+    assert '**Почему ИИ:**' in cases and '**Альтернатива без GenAI:**' in cases
+    assert '**Контроль:**' in cases and '**Критерий:**' in cases
+    assert 'не только фиксированный шаблон' in cases or 'фиксированная схема полей' in cases
+
+
+def test_source_appendix_prefers_explicit_measured_scope_and_keeps_alternative_outcomes():
+    _,_,a,n=map_case()
+    p=proposal(n,['correction','answer'],task_type='semantic_review')
+    p['measurement']['source_action_ids']=n['map']['actions'][1]['source_action_ids']
+    saved=generate_opportunities(n,a,OpportunityMock(plan(p)))
+    appendix=render_markdown(saved).split('## Приложение с источниками')[1]
+    assert 'исправление допущенных' in appendix and 'об отсутствии опечаток' in appendix
+    assert 'action-' not in appendix and 'evidence-' not in appendix
+
+
+def test_hours_metric_without_actual_sample_keeps_minutes_and_marked_standard_comparison():
+    from opportunity_helpers import agency_map, labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    p['measurement']['primary']['unit']='hours'
+    p['measurement']['time_scenarios']=labor_assumptions()
+    result=generate_opportunities(n,a,OpportunityMock(plan(p)))
+    row=result['report']['initiatives'][0]
+    base=next(s for s in row['economics']['scenarios'] if s['name']=='base')
+    assert base['results']['released_hours']['value'] is None
+    assert base['results']['standardized_hours']['value']=='133.33'
+    from govai.opportunity_report import economic_summary
+    summary=economic_summary(row)
+    assert '8,00 человеко-минут на подходящий случай' in summary
+    assert '133,33 человеко-часа на условные 1 000 подходящих случаев' in summary
+    assert 'не годовая нагрузка' in summary and row['economics']['status']=='needs_data'
+
+
+def test_docx_and_bundle_use_same_saved_report_with_cyrillic_and_complete_json():
+    from io import BytesIO
+    from zipfile import ZipFile
+    from docx import Document
+    from docx.oxml.ns import qn
+    from govai.report_export import render_docx, render_bundle
+    _,_,a,n=map_case(); provider=OpportunityMock(three_proposals(n))
+    artifact=generate_opportunities(n,a,provider)
+    before=deepcopy(artifact)
+    markdown=render_markdown(artifact).encode('utf-8')
+    data=render_docx(artifact)
+    document=Document(BytesIO(data))
+    text='\n'.join(p.text for p in document.paragraphs)
+    assert 'Резюме для руководителя' in text and 'Приложение с источниками' in text
+    assert 'Сверка материалов при исправлении ошибок' in text
+    assert 'исправление допущенных' in text and 'об отсутствии опечаток' in text
+    assert '\\.' not in text and '##' not in text
+    assert document.tables and len(document.tables[0].columns)==4
+    assert document.tables[0].rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
+    assert document.sections[0].page_width.cm==pytest.approx(21,abs=.01)
+    assert document.sections[0].page_height.cm==pytest.approx(29.7,abs=.01)
+    assert not document.element.xpath('.//w:br[@w:type="page"]')
+    assert all(not rel.is_external for rel in document.part.rels.values())
+    with ZipFile(BytesIO(render_bundle(artifact,docx_data=data,markdown_data=markdown))) as archive:
+        assert set(archive.namelist())=={'opportunity-report.docx','opportunity-report.md','opportunities.json','README.txt'}
+        assert archive.testzip() is None
+        assert archive.read('opportunity-report.docx')==data
+        assert archive.read('opportunity-report.md')==markdown
+        saved=archive.read('opportunities.json')
+        assert json.loads(saved)==artifact
+        assert restore_opportunities(saved,n,a,'test-model')==artifact
+        assert 'предварительные' in archive.read('README.txt').decode('utf-8')
+        assert '2023-05-30' in archive.read('README.txt').decode('utf-8')
+    assert len(provider.calls)==1 and artifact==before
+
+
+def test_docx_literal_source_markup_long_names_and_bundle_mismatch_are_safe():
+    from io import BytesIO
+    from docx import Document
+    from govai.report_export import render_docx, render_bundle
+    _,_,a,n=simple_map()
+    saved=generate_opportunities(n,a,OpportunityMock(plan(proposal(n))))
+    # Presentation robustness only; source validators remain tested separately.
+    saved['report']['initiatives'][0]['title']='Очень длинное название содержательной проверки ' * 8
+    for proof in saved['report']['evidence'].values():
+        proof['quote']='Текст с `кавычками`, **звёздочками**, символом | и ссылкой [пример](https://invalid.example).'
+    document=Document(BytesIO(render_docx(saved)))
+    text='\n'.join(p.text for p in document.paragraphs)
+    assert '**звёздочками**' in text and '[пример](https://invalid.example)' in text
+    assert not document.element.xpath('.//w:hyperlink')
+    assert 'Очень длинное название' in document.tables[0].cell(1,0).text
+    with pytest.raises(ValueError,match='does not describe'):
+        render_bundle(saved,json_data=b'{}')
+
+
+def test_untrusted_rejection_metadata_does_not_erase_grounded_proposal():
+    _,_,a,n=simple_map()
+    ready=plan(proposal(n),rejected=[{'title':'Непроверенный сценарий','action_ids':['fake'],'reason':'Текст модели'}])
+    saved=generate_opportunities(n,a,OpportunityMock(ready))
+    assert len(saved['report']['initiatives'])==1
+    rejected=saved['report']['rejected'][0]
+    assert rejected['origin']=='integrity_validator' and rejected['action_ids']==[]
+    assert rejected['source_action_ids']==[] and 'не подтверждены' in rejected['reason']
+    assert saved['plan']['rejected'][0]['action_ids']==['fake']
+    assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==saved
+
+
+@pytest.mark.parametrize('mode,meaning',[('automation_explicit','автоматизация прямо предусмотрена НПА'),
+    ('manual_explicit','ручное действие прямо предусмотрено НПА'),('mixed','смешанный способ'),('unknown','не определён')])
+def test_business_translation_preserves_automation_evidence_and_substantive_risk(mode,meaning):
+    from govai.opportunity_report import business_text
+    value=business_text(f'Нужно разграничить проверку содержания, включая записи с mode={mode}; юридическое решение остаётся человеку.')
+    assert meaning in value and 'Нужно разграничить проверку содержания' in value
+    assert 'юридическое решение остаётся человеку' in value and 'mode=' not in value
+
+
+@pytest.mark.parametrize('metric',['primary','secondary'])
+def test_explicit_numbers_do_not_override_incompatible_measurement_units(metric):
+    from opportunity_helpers import agency_map,labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    if metric=='secondary': p['measurement'][metric]={'category':'labor','name':'Дополнительное рабочее время','unit':'RUB/year'}
+    else: p['measurement'][metric]['unit']='RUB/year'
+    supplied=[{'name':s['name'],'parameters':{'before_minutes':s['before_minutes'],'after_minutes':s['after_minutes']}} for s in labor_assumptions()]
+    row=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied})['report']['initiatives'][0]
+    assert row['economics']['status']=='needs_data' and not row['economics']['scenarios']
+    assert row['measurement']['validation_issues'] and row['prospect']['category']=='insufficient'
+
+
+@pytest.mark.parametrize('field',['work','case_unit','boundary','method','success_criterion','human_role'])
+def test_external_numbers_require_complete_measurement_scope_and_human_work(field):
+    from opportunity_helpers import agency_map,labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    if field=='human_role': p[field]=' '
+    else: p['measurement'][field]=' '
+    supplied=[{'name':s['name'],'parameters':{'before_minutes':s['before_minutes'],'after_minutes':s['after_minutes']}} for s in labor_assumptions()]
+    row=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied})['report']['initiatives'][0]
+    assert row['economics']['status']=='needs_data' and not row['economics']['scenarios']
+    assert row['measurement']['validation_issues']
+
+
+@pytest.mark.parametrize('change',[{'ai_necessity':'uncertain'},{'novelty':'unknown'}])
+def test_uncertain_added_value_preserves_hypothesis_but_not_high_prospect_or_numbers(change):
+    from opportunity_helpers import agency_map,labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time',**change)
+    p['measurement']['time_scenarios']=labor_assumptions()
+    p['prospect_assessment']['pilot_feasibility']='bounded'
+    result=generate_opportunities(n,a,OpportunityMock(plan(p)))['report']
+    assert len(result['initiatives'])==1 and not result['rejected']
+    row=result['initiatives'][0]
+    assert row['prospect']['category']=='insufficient' and row['prospect']['assessment_issues']
+    assert row['economics']['status']=='needs_data' and not row['economics']['scenarios']
+    assert row['grounding'] and row['measurement']['method']
+
+
+def test_explicit_zero_after_does_not_claim_completed_human_review():
+    from opportunity_helpers import agency_map,labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    supplied=[{'name':s['name'],'parameters':{'before_minutes':s['before_minutes'],'after_minutes':s['after_minutes']}} for s in labor_assumptions()]
+    supplied[0]['parameters']['after_minutes']['value']='0'
+    row=generate_opportunities(n,a,OpportunityMock(plan(p)),scenario_inputs={'pilot':supplied})['report']['initiatives'][0]
+    assert not row['economics']['scenarios'] and any('Нулевое' in x for x in row['economics']['reasons'])
+
+
+def test_concise_case_unit_is_not_confused_with_missing_measurement_definition():
+    from opportunity_helpers import agency_map,labor_assumptions
+    _,_,a,n=agency_map(); p=proposal(n,economic_model='labor_time')
+    p['measurement'].update(case_unit='Одно обращение',time_scenarios=labor_assumptions())
+    row=generate_opportunities(n,a,OpportunityMock(plan(p)))['report']['initiatives'][0]
+    assert row['economics']['scenarios'][1]['results']['saved_minutes']['value']=='8.00'
+    assert not row['measurement']['validation_issues']

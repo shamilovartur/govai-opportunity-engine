@@ -3,7 +3,7 @@
 import re
 from decimal import Decimal
 
-PROSPECT_VERSION = 'prospect-1.0'
+PROSPECT_VERSION = 'prospect-1.1'
 PROSPECT_RULES = {
     'insufficient': 'Механизм добавочной ценности неясен или возможность ограниченного пилота неизвестна.',
     'low': 'Добавочная ценность слаба либо ограниченный пилот пока не обоснован.',
@@ -11,6 +11,7 @@ PROSPECT_RULES = {
     'high': 'Механизм конкретен; предложен ограниченный измеримый пилот с контролем рисков.',
     'unknown_data': 'Неизвестная готовность данных отражается в неопределённости, а не автоматически в низкой категории.',
     'scope': 'Перспективность дальнейшей проработки не означает доказанную окупаемость или готовность к внедрению.',
+    'consistency': 'Противоречивый или неполный механизм, пилот либо протокол измерения означает недостаток оснований; отсутствие числового прогноза само по себе категорию не снижает.',
 }
 CATEGORIES = {'high': 'Высокая перспективность', 'medium': 'Средняя перспективность',
               'low': 'Низкая перспективность', 'insufficient': 'Недостаточно оснований для оценки'}
@@ -27,6 +28,11 @@ PARAMETERS = {'annual_cases': 'Обращений за год', 'case_count': '�
 UNIT_LABELS = {'minutes/case': 'человеко-минут на случай', 'hours': 'человеко-часов',
     'minutes/process': 'минут на этап', 'share': 'доля', 'cases': 'случаев', 'cases/year': 'случаев/год',
     'RUB/hour': 'руб./час', 'RUB/year': 'руб./год', 'RUB/case': 'руб./случай', 'RUB': 'руб.'}
+
+
+def meaningful_text(value):
+    """Check explanatory structure, not truth or semantic quality of the hypothesis."""
+    return isinstance(value, str) and len(value.strip()) >= 20 and len(re.findall(r'\w+', value)) >= 3
 
 
 def assess_prospects(initiatives, *, incomplete_input=False):
@@ -49,11 +55,36 @@ def assess_prospects(initiatives, *, incomplete_input=False):
             category = 'medium'
         else:
             category = 'high'
+        issues = []
+        if initiative.get('ai_necessity') == 'uncertain' or initiative.get('novelty') == 'unknown':
+            issues.append('Добавочная ценность ИИ пока не обоснована относительно обычного или существующего решения.')
+        if not all(meaningful_text(initiative.get(k)) for k in ('why_ai', 'non_ai_alternative')):
+            issues.append('Не раскрыто преимущество ИИ относительно обычной автоматизации.')
+        elif initiative['why_ai'].strip().casefold() == initiative['non_ai_alternative'].strip().casefold():
+            issues.append('Описание пользы ИИ повторяет обычную альтернативу; добавочная ценность не раскрыта.')
+        m = initiative.get('measurement', {})
+        if not all(meaningful_text(a.get(k)) for k in ('value_reason', 'pilot_reason', 'pilot', 'success_criterion', 'change_condition', 'main_uncertainty')):
+            issues.append('Не определены основания, условия пересмотра оценки или проверяемый ограниченный пилот.')
+        if (len(str(m.get('case_unit') or '').strip()) < 3 or
+                not all(meaningful_text(m.get(k)) for k in ('work', 'boundary', 'method', 'success_criterion'))):
+            issues.append('Нужно уточнить измеряемую работу, границы, единицу случая и критерий пилота.')
+        if not meaningful_text(initiative.get('human_role')) or not initiative.get('human_approval_required'):
+            issues.append('Не определена проверка и ответственность уполномоченного человека.')
+        if not initiative.get('risks') or not all(meaningful_text(x) for x in initiative['risks']):
+            issues.append('Риски и ограничения пилота не раскрыты; допустимость проверки требует уточнения.')
+        quality = any(metric and metric.get('category') == 'quality' for metric in (m.get('primary'), m.get('secondary')))
+        if quality and not all(meaningful_text((m.get('quality_protocol') or {}).get(k))
+                               for k in ('calculation', 'expert_reference', 'unacceptable_errors')):
+            issues.append('Для показателя качества нужны способ расчёта, экспертный эталон и перечень недопустимых ошибок.')
+        issues.extend(m.get('validation_issues', []))
+        if issues:
+            category = 'insufficient'
         assessed.append({**initiative, 'prospect': {
             'category': category, 'label': CATEGORIES[category],
-            'reason': ' '.join((a['value_reason'].strip(), a['pilot_reason'].strip())),
+            'reason': ' '.join((a['value_reason'].strip(), a['pilot_reason'].strip(), *issues)).strip(),
             'main_uncertainty': a['main_uncertainty'], 'change_condition': a['change_condition'],
             'pilot': a['pilot'], 'success_criterion': a['success_criterion'], 'preliminary': True,
+            'assessment_issues': issues,
         }})
     # These are named groups, not scores or ordinal places within a group.
     return [a for category in CATEGORIES for a in assessed if a['prospect']['category'] == category]
@@ -65,12 +96,24 @@ def _safe(value):
 
 
 def business_text(value):
-    """Keep internal reconciliation diagnostics in JSON, translate their significance."""
+    """Translate diagnostic spans without discarding the surrounding business meaning."""
     text = ' '.join(str(value).split())
-    text = re.sub(r',?\s*включая записи с mode=[A-Za-z_]+', '', text)
-    if re.search(r'\b(?:review|requires_review|review_reasons|incomplete|action[_-][\w-]+|context_action_ids|source_action_ids|a\d+)\b|mode=|не объединен[оаы]?|не объединён[оаы]?', text, re.I):
-        return 'Границы операции и распределение ответственности требуют уточнения.'
-    return text
+    modes = {'automation_explicit': 'автоматизация прямо предусмотрена НПА',
+             'manual_explicit': 'ручное действие прямо предусмотрено НПА',
+             'mixed': 'предусмотрен смешанный способ выполнения',
+             'unknown': 'способ выполнения не определён'}
+    text = re.sub(r'\bmode=([A-Za-z_]+)', lambda match: modes.get(match.group(1),
+                  'способ выполнения требует уточнения'), text)
+    text = re.sub(r'не объедин[её]н[оаы]?\s+с\s+(?:action[_-][\w-]+|a\d+)\b',
+                  'Границы операции и распределение ответственности требуют уточнения', text, flags=re.I)
+    translations = {'review_reasons': 'замечания к границам операции', 'requires_review': 'требуется содержательная проверка',
+                    'review': 'группировка требует проверки', 'incomplete': 'часть группировки ещё не подтверждена',
+                    'context_action_ids': 'ссылки на вспомогательный контекст', 'source_action_ids': 'ссылки на исходные действия'}
+    for technical, business in translations.items():
+        text = re.sub(r'\b' + technical + r'\b', business, text, flags=re.I)
+    text = re.sub(r'\b(?:action[_-][\w-]+|a\d+)\b', 'указанная операция', text, flags=re.I)
+    text = re.sub(r'\b(?:sha256|hash|хеш)\s*[:=]?\s*[a-f0-9]{32,64}\b', 'идентификатор исходного документа', text, flags=re.I)
+    return text.strip()
 
 
 def _business(value):
@@ -95,6 +138,8 @@ def _number(value):
 
 def _metric_name(initiative):
     primary = initiative['measurement']['primary']
+    if initiative['measurement'].get('validation_issues'):
+        return business_text(primary['name']) + ' (единицу и способ измерения нужно уточнить)'
     return business_text(primary['name']) + ' (' + UNIT_LABELS.get(primary['unit'], primary['unit']) + ')'
 
 
@@ -109,9 +154,22 @@ def _result_summary(initiative, scenario):
         count = scenario['parameters'].get('case_count', {}).get('value')
         if measurement['primary']['unit'] == 'hours':
             if hours is not None:
-                return f"{_number(hours)} человеко-часа на {_number(count)} {population}"
+                per_case = ('; ' + _number(minutes) + ' человеко-минут на ' +
+                            ('подходящий случай' if measurement['population'] == 'eligible_cases' else 'обращение')) if minutes is not None else ''
+                return f"{_number(hours)} человеко-часа на {_number(count)} {population}" + per_case
+            if minutes is not None:
+                return (_number(minutes) + ' человеко-минут на ' +
+                        ('подходящий случай' if measurement['population'] == 'eligible_cases' else 'обращение') +
+                        '; размер фактической выборки не задан')
         elif minutes is not None:
-            return f"{_number(minutes)} человеко-минут на " + ('подходящий случай' if measurement['population'] == 'eligible_cases' else 'обращение')
+            summary = f"{_number(minutes)} человеко-минут на " + ('подходящий случай' if measurement['population'] == 'eligible_cases' else 'обращение')
+            eligible = results.get('eligible_saved_minutes', {}).get('value')
+            if measurement['population'] == 'all_cases' and eligible is not None:
+                summary += '; ' + _number(eligible) + ' человеко-минут на подходящий случай'
+            return summary
+        eligible = results.get('eligible_saved_minutes', {}).get('value')
+        if measurement['population'] == 'all_cases' and eligible is not None:
+            return _number(eligible) + ' человеко-минут на подходящий случай; применимость к общему потоку неизвестна, общий эффект не оценён'
     elif model == 'elapsed_time':
         minutes = results.get('saved_elapsed_minutes', {}).get('value')
         if minutes is not None:
@@ -127,12 +185,21 @@ def economic_summary(initiative):
     """Kept as the UI's single effect-summary function, now covering four metric types."""
     e = initiative['economics']
     scope = 'На выбранном участке: ' if initiative['measurement'].get('partial_initiative') else ''
+    if e['model'] in ('labor_time', 'time_capacity'):
+        participant = initiative['measurement'].get('participant', {})
+        scope += participant.get('label', 'Участник измерения не определён') + '. '
     base = next((s for s in e['scenarios'] if s['name'] == 'base'), None)
     if base:
         result = _result_summary(initiative, base)
         if result:
             assumed = any(p['origin'] == 'illustrative' for p in base['parameters'].values())
-            return scope + ('Сценарная оценка: ' if assumed else 'Условная оценка: ') + result
+            summary = scope + ('Сценарная оценка: ' if assumed else 'Условная оценка: ') + result
+            comparison = base['results'].get('standardized_hours', {})
+            if comparison.get('value') is not None and (initiative['measurement']['primary']['unit'] != 'hours'
+                    or base['results'].get('released_hours', {}).get('value') is None):
+                population = 'подходящих случаев' if initiative['measurement']['population'] == 'eligible_cases' else 'всех обращений с указанной применимостью'
+                summary += '. Для сравнения: ' + _number(comparison['value']) + ' человеко-часа на условные 1 000 ' + population + '; не годовая нагрузка'
+            return summary
     return scope + _metric_name(initiative) + '. Прогноз не задан; требуется измерение на пилоте.'
 
 
@@ -212,45 +279,84 @@ def _scenario_lines(initiative):
     return lines
 
 
+def _pilot_candidates(initiatives):
+    # A short discussion agenda, not a ranking within the qualitative category.
+    return [a for a in initiatives if a['prospect']['category'] == 'high'][:3]
+
+
+def _source_proofs(initiative, registry):
+    """Prefer direct measured-operation proofs, then cover other targeted operations."""
+    measured = set(initiative['measurement']['source_action_ids'])
+    candidates = [c for g in initiative['grounding'] for c in g['source_candidates']]
+    candidates.sort(key=lambda c: c['source_action_id'] not in measured)
+    selected, seen = [], set()
+    for candidate in candidates:
+        refs = [ref for ref in candidate['evidence_refs'] if ref in registry]
+        if not refs: continue
+        # No guessed legal clauses or semantic relevance classifier: these are the
+        # original candidate's direct proofs, not unrelated contextual quotations.
+        refs.sort(key=lambda ref: (ref not in initiative['evidence_refs'], len(registry[ref]['quote'])))
+        proof = registry[refs[0]]
+        identity = (proof['clause_number'], proof['quote'])
+        if identity not in seen:
+            selected.append(proof); seen.add(identity)
+    return selected[:6], len(selected) > 6
+
+
 def render_markdown(artifact):
     r = artifact['report']; initiatives = r['initiatives']; d = r['document']
     document = ' '.join(str(d.get(k) or '') for k in ('act_type', 'number', 'adoption_date')).strip()
+    selected = _pilot_candidates(initiatives)
+    selected_ids = {a['id'] for a in selected}
     lines = ['# AI-возможности и ожидаемый эффект', '', '## Резюме для руководителя', '',
              _safe(document or 'Нормативный акт') + ('. Редакция: ' + _safe(d['revision_date']) if d.get('revision_date') else ''), '']
+    if d.get('title'): lines += [_business(d['title']), '']
     processes = list(dict.fromkeys(business_text(g['process_title']) for a in initiatives for g in a['grounding']))
     if processes:
-        lines += ['Рассмотрены процессы: ' + _brief('; '.join(processes), 16) + '.', '']
-    lines += ['Перспективность означает обоснованность дальнейшей проработки, а не окупаемость или готовность к внедрению. '
-              'Источники сверены с НПА; эффект проверяется пилотом.', '']
-    if not initiatives:
-        lines += [_business(r['explanation']), '']
-    lines += ['## Сравнение AI-инициатив', '',
-              '| Инициатива | Что улучшает | Перспективность | Ожидаемый эффект | Что нужно проверить |',
-              '| --- | --- | --- | --- | --- |']
-    for a in initiatives:
-        p = a['prospect']; m = a['measurement']
-        base = next((s for s in a['economics']['scenarios'] if s['name'] == 'base'), None)
-        effect = _result_summary(a, base) if base else None
-        effect = ('Сценарно: ' + effect) if effect and any(v['origin'] == 'illustrative' for v in base['parameters'].values()) else effect
-        if not effect:
-            effect = _metric_name(a) + ' — измерить'
-        if m.get('partial_initiative'):
-            effect = 'Выбранный участок: ' + effect
-        lines += ['| ' + ' | '.join((_business(a['title']), _business(_first_sentence(a['ai_role'])), _safe(p['label']),
-                    _business(effect), _business(p['main_uncertainty']))) + ' |']
-    high = [a for a in initiatives if a['prospect']['category'] == 'high']
-    lines += ['', '## Перспективные направления для первых пилотов', '']
-    if high:
-        lines += ['Сначала проверить инициативы высокой перспективности: их ограниченные пилоты и критерии описаны ниже.', '']
+        lines += ['Рассмотрены процессы: ' + _brief('; '.join(processes), 22) + '.', '']
+    if selected:
+        lines += ['Для первой проверки предложены следующие ограниченные пилоты. Это повестка обсуждения, а не места в рейтинге:', '']
+        for a in selected:
+            lines += ['- **' + _business(a['title']) + ':** ' + _business(a['prospect']['reason'])]
+        lines += ['']
+    elif initiatives:
+        lines += ['Обоснованных кандидатов для первого ограниченного пилота пока нет. Сначала нужно выполнить условия:', '']
+        for a in initiatives[:3]:
+            lines += ['- **' + _business(a['title']) + ':** ' + _business(a['prospect']['main_uncertainty'])]
+        lines += ['']
     else:
-        lines += ['До пилотов устранить обозначенные неопределённости. Низкая перспективность и недостаток оснований — разные выводы.', '']
+        lines += [_business(r['explanation']), '']
+    lines += ['Перспективность — основание для дальнейшей проверки, не доказательство окупаемости. НПА подтверждает операцию, '
+              'а не её фактическую сложность, готовность данных или необходимость ИИ.', '',
+              '## Сравнение AI-инициатив', '',
+              '| Инициатива и решение | Перспективность: основание | Метрика и ожидаемый эффект | Условие пилота |',
+              '| --- | --- | --- | --- |']
+    for a in initiatives:
+        p = a['prospect']
+        lines += ['| ' + ' | '.join((_business(a['title']) + ': ' + _brief(_first_sentence(a['ai_role']), 24),
+                    _safe(p['label']) + '. ' + _brief(p['reason'], 24),
+                    _business(economic_summary(a)), _business(p['main_uncertainty']))) + ' |']
+    lines += ['', '## Перспективные направления для первых пилотов', '']
+    if not selected:
+        lines += ['Начать с уточнения границ задачи, безопасного доступа к примерам и экспертного эталона; '
+                  'не переходить к внедрению только на основании нормативной цитаты.', '']
+    for a in selected:
+        p = a['prospect']; m = a['measurement']
+        lines += ['### ' + _business(a['title']), '',
+            '**Проблема для проверки:** ' + _business(a['problem']), '',
+            '**Почему ИИ:** ' + _business(a['why_ai']) + ' **Альтернатива без GenAI:** ' + _business(a['non_ai_alternative']), '',
+            '**Пилот:** ' + _business(p['pilot']) + ' **Критерий:** ' + _business(m['success_criterion']), '',
+            '**Контроль:** ' + _business(a['human_role']) + ' ' + _business(a['risks'][0]), '',
+            '**Изменит оценку:** ' + _business(p['change_condition']), '']
     lines += ['## Ожидаемый эффект и предпосылки оценки', '']
     for a in initiatives:
         p = a['prospect']; m = a['measurement']; e = a['economics']
-        lines += ['### ' + _business(a['title']), '',
-                  '**Основание:** ' + _business(p['reason']) + ' **Пилот:** ' + _business(m['method']) +
-                  ' **Критерий:** ' + _business(m['success_criterion']), '']
-        # Technical uncertainty is not copied as business prose; each scope retains its explicit boundary.
+        lines += ['### ' + _business(a['title']), '']
+        if a['id'] not in selected_ids:
+            lines += ['**Основание:** ' + _business(a['why_ai']) + ' **Без GenAI:** ' + _business(a['non_ai_alternative']), '',
+                      '**Проверка:** ' + _business(m['method']) + ' **Критерий:** ' + _business(m['success_criterion']), '',
+                      'Изменит оценку: ' + _business(p['change_condition']), '']
+        lines += [economic_summary(a), '']
         if m.get('partial_initiative'):
             lines += ['Оценивается только выбранный участок: ' + _business(m['work']) +
                       ' Другие операции не включены. ' + _business(m['boundary']) +
@@ -262,7 +368,11 @@ def render_markdown(artifact):
             lines += numeric
         elif e['required_parameters']:
             lines += ['Для расчёта нужны: ' + ', '.join(_safe(PARAMETERS[k]) for k in e['required_parameters']) + '.', '']
-        lines += ['Изменит оценку: ' + _business(p['change_condition']), '']
+        protocol = m.get('quality_protocol')
+        if protocol:
+            lines += ['**Метрика качества:** ' + _business(protocol['calculation']) +
+                      ' **Эталон:** ' + _business(protocol['expert_reference']) +
+                      ' **Недопустимые ошибки:** ' + _business(protocol['unacceptable_errors']), '']
         if m.get('secondary'):
             metric = m['secondary']
             lines += ['Дополнительно измерить: ' + _business(metric['name']) +
@@ -274,21 +384,25 @@ def render_markdown(artifact):
               '- Эквивалент мощности — не бюджетная экономия. Неизвестные затраты — не ноль. Решения и утверждение документов остаются уполномоченному человеку.']
     if r['normalization_status'] != 'completed':
         lines += ['- Для части операций нужно уточнить границы и участников до количественных выводов.']
+    if any(a['prospect'].get('assessment_issues') for a in initiatives):
+        lines += ['- Для отдельных гипотез ещё не определён допустимый измеримый пилот; они не включены в первые кандидаты.']
     lines += ['', 'Полные описания и условия — в JSON; сокращения отмечены многоточием.', '']
     if r['rejected']:
         lines += ['## Отклонённые сценарии', '']
-        lines += ['- **' + _brief(x['title'], 8) + ':** ' + _brief(_first_sentence(x['reason']), 10) for x in r['rejected']]
+        lines += ['- **' + _brief(x['title'], 10) + ':** ' + _business(_first_sentence(x['reason'])) for x in r['rejected']]
     lines += ['', '## Приложение с источниками', '',
               'Цитаты подтверждают операции, а не прогноз эффекта. Полные цитаты, координаты и расчётные параметры — в opportunities.json.', '']
     for a in initiatives:
         lines += ['**' + _business(a['title']) + '**', '']
-        eid = a['grounding'][0]['source_candidates'][0]['evidence_refs'][0]
-        proof = r['evidence'][eid]
-        lines += ['Пункт ' + _safe(proof['clause_number'] or 'не определён') +
-                  (f"; страница PDF {proof['page_number']}" if proof['page_number'] else '') + ':', '']
-        quote = proof['quote']
-        if len(quote) > 300:
-            quote = quote[:299].rstrip() + '…'
-        fence = '`' * max(3, 1 + max((len(x) for x in re.findall(r'`+', quote)), default=0))
-        lines += [fence + 'text', quote, fence, '']
+        proofs, more = _source_proofs(a, r['evidence'])
+        for proof in proofs:
+            lines += ['Пункт ' + _safe(proof['clause_number'] or 'не определён') +
+                      (f"; страница PDF {proof['page_number']}" if proof['page_number'] else '') + ':', '']
+            quote = proof['quote']
+            if len(quote) > 300:
+                quote = quote[:299].rstrip() + '…'
+            fence = '`' * max(3, 1 + max((len(x) for x in re.findall(r'`+', quote)), default=0))
+            lines += [fence + 'text', quote, fence, '']
+        if more:
+            lines += ['Дополнительные подтверждения целевых операций приведены в полном JSON.', '']
     return '\n'.join(lines)

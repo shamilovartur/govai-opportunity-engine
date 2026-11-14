@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 
 from govai.processes import ProcessError, StrictModel
 
-METHOD_VERSION = 'effect-2.0'
+METHOD_VERSION = 'effect-2.1'
 UNITS = {
     'annual_cases': 'cases/year', 'applicability': 'share', 'adoption': 'share',
     'before_minutes': 'minutes/case', 'after_minutes': 'minutes/case', 'realization': 'share',
@@ -203,12 +203,20 @@ def calculate_effect_scenario(model, scenario: Scenario | dict, *, population='e
         with localcontext() as ctx:
             ctx.prec, ctx.rounding = 60, ROUND_HALF_EVEN
             if model == 'labor_time':
-                minutes = ['before_minutes', 'after_minutes'] + (['applicability'] if population == 'all_cases' else [])
-                values['saved_minutes'] = compute(minutes, lambda before, after, share=Decimal(1): (before-after)*share)
-                values['released_hours'] = compute(['case_count', 'saved_minutes'], lambda cases, minutes: cases*minutes/60)
-                formulas = {'saved_minutes': ('minutes/case', '(before_minutes - after_minutes)' +
+                values['eligible_saved_minutes'] = compute(['before_minutes', 'after_minutes'], lambda before, after: before-after)
+                minutes = ['eligible_saved_minutes'] + (['applicability'] if population == 'all_cases' else [])
+                values['saved_minutes'] = compute(minutes, lambda difference, share=Decimal(1): difference*share)
+                to_hours = lambda cases, minutes: cases*minutes/60
+                values['released_hours'] = compute(['case_count', 'saved_minutes'], to_hours)
+                # A unit of comparison, never an observed workload or a substitute
+                # for the unknown case_count. Applicability is already in saved_minutes.
+                values['standardized_basis'] = Decimal(1000)
+                values['standardized_hours'] = compute(['standardized_basis', 'saved_minutes'], to_hours)
+                formulas = {'eligible_saved_minutes': ('minutes/eligible_case', 'before_minutes - after_minutes'),
+                    'saved_minutes': ('minutes/case', '(before_minutes - after_minutes)' +
                     (' * applicability' if population == 'all_cases' else '')),
-                    'released_hours': ('hours', 'case_count * saved_minutes / 60')}
+                    'released_hours': ('hours', 'case_count * saved_minutes / 60'),
+                    'standardized_hours': ('hours/1000_' + population, '1000 * saved_minutes / 60')}
                 warning = 'Минуты после включают проверку и исправление результата специалистом; нормативный срок не является трудозатратами.'
                 if population == 'all_cases':
                     warning += ' Показатель на один случай взвешен по явно указанной доле применимости.'
@@ -222,6 +230,10 @@ def calculate_effect_scenario(model, scenario: Scenario | dict, *, population='e
                 rounded = value.quantize(Decimal('0.01')) if value is not None else None
                 results[name] = {'value': None if rounded is None else format(abs(rounded) if rounded == 0 else rounded, 'f'),
                                  'unit': unit, 'formula': formula}
+            if model == 'labor_time':
+                results['standardized_hours']['basis'] = {
+                    'value': '1000', 'unit': 'cases', 'origin': 'illustrative', 'population': population,
+                    'note': 'Условная единица сравнения, не фактическая нагрузка и не годовой объём.'}
         missing = [name for name in required if params[name]['value'] is None]
         illustrative = any(p['origin'] == 'illustrative' for p in params.values())
         return {'name': s.name, 'status': 'needs_data' if missing else 'illustrative' if illustrative else 'conditional_estimate',
