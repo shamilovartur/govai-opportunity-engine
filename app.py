@@ -1,0 +1,121 @@
+"""Run with: python -m streamlit run app.py."""
+
+import json
+from pathlib import Path
+
+import streamlit as st
+
+from govai.extraction import (
+    SUPPORTED_EXTENSIONS,
+    TXT_ENCODINGS,
+    ExtractionError,
+    extract_document,
+)
+from govai.url_input import extract_url_document
+from govai.process_ui import render_processes
+
+
+def _load_input():
+    mode = st.radio('Способ загрузки', ['Загрузить файл', 'Загрузить по ссылке'], horizontal=True)
+    if mode == 'Загрузить по ссылке':
+        st.caption('Публичная HTTPS-ссылка на PDF или HTML-страницу с текстом НПА · До 10 МБ')
+        url = st.text_input('Ссылка на документ', placeholder='https://example.org/document.pdf')
+        if st.button('Загрузить по ссылке', type='primary'):
+            # Clear the old result before every attempt, including failed retries.
+            st.session_state.pop('url_document', None)
+            st.session_state.pop('loaded_url', None)
+            try:
+                with st.spinner('Загружаем документ…'):
+                    st.session_state.url_document = extract_url_document(url)
+                st.session_state.loaded_url = url
+            except ExtractionError as exc:
+                st.error(str(exc))
+                return None
+        if st.session_state.get('loaded_url') == url:
+            return st.session_state.get('url_document')
+        st.info('Укажите публичную ссылку и нажмите «Загрузить по ссылке».')
+        return None
+
+    uploaded_file = st.file_uploader(
+        'Выберите документ', type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=False,
+        help='PDF должен содержать текстовый слой. Распознавание сканов пока не поддерживается.',
+    )
+    if uploaded_file is None:
+        st.info('Добавьте файл — извлечённый текст появится здесь.')
+        return None
+    encoding = 'utf-8-sig'
+    if Path(uploaded_file.name).suffix.lower() == '.txt':
+        label = st.selectbox('Кодировка TXT', options=list(TXT_ENCODINGS))
+        encoding = TXT_ENCODINGS[label]
+    try:
+        with st.spinner('Извлекаем текст…'):
+            document = extract_document(uploaded_file.name, uploaded_file.getvalue(), encoding=encoding)
+        return document
+    except ExtractionError as exc:
+        st.error(str(exc))
+        return None
+
+
+def main() -> None:
+    st.set_page_config(page_title="GovAI — извлечение текста", page_icon="📄")
+    st.title("GovAI Opportunity Engine")
+    st.write("Загрузите документ, чтобы извлечь и просмотреть его текст.")
+    st.caption("PDF, DOCX или TXT · Один файл до 10 МБ")
+
+    document = _load_input()
+    if document is None:
+        st.session_state.pop('process_result', None)
+        st.session_state.pop('process_document', None)
+        return
+
+    text = document["text"]
+    if not text.strip():
+        st.warning(
+            "В документе не найден текст. Возможно, документ пуст или содержит "
+            "только изображения. Для PDF-сканов потребуется OCR, который пока не поддерживается."
+        )
+        return
+
+    st.success("Текст успешно извлечён.")
+    if document['source'].get('type') == 'url_html':
+        st.warning('Извлечён основной текст HTML-страницы. Полнота НПА автоматически не подтверждена; '
+                   'сверьте документ с источником. Номера страниц для HTML неизвестны.')
+    if document['source'].get('original_url'):
+        st.write('Источник:', document['source']['original_url'])
+        st.caption('Получено (UTC): ' + document['source']['retrieved_at'])
+    st.caption(f"Символов: {len(text):,}")
+    st.text_area("Извлечённый текст", value=text, height=420)
+    st.subheader("Структура документа")
+    metadata = document["metadata"]
+    for label, key in (("Название", "title"), ("Номер", "number"),
+                       ("Дата принятия", "adoption_date"), ("Редакция", "revision_date")):
+        value = metadata[key]
+        st.write(f"{label}: {value['value'] if value else 'не определено'}")
+    st.caption(
+        "Структура определена по явным маркерам и требует проверки. "
+        "Пустая ссылка на пункт означает, что принадлежность не определена. "
+        "Страницы PDF считаются от начала файла; у DOCX, TXT и HTML пагинация неизвестна."
+    )
+    if "numbered_clauses_not_recognized" in document["warnings"]:
+        st.info("Нумерованные пункты не распознаны. Исходный текст сохранён полностью.")
+    if any(w.startswith("pdf_page_without_text:") for w in document["warnings"]):
+        st.warning("На некоторых страницах PDF нет извлекаемого текста. Проверьте оригинал.")
+    clauses = {c["id"]: c for c in document["clauses"]}
+    with st.expander("Фрагменты и ссылки на пункты"):
+        st.dataframe([
+            {"Фрагмент": f["id"], "Страница": f["page_number"],
+             "Пункт": clauses[f["clause_id"]]["marker"] if f["clause_id"] else None,
+             "Привязка": f["attribution"], "Текст": f["text"]}
+            for f in document["fragments"] if f["text"].strip()
+        ], hide_index=True)
+    st.download_button(
+        "Скачать структуру JSON",
+        data=json.dumps(document, ensure_ascii=False, indent=2),
+        file_name=f"{Path(document['source']['filename']).stem}.structure.json",
+        mime="application/json",
+    )
+    render_processes(document)
+
+
+if __name__ == "__main__":
+    main()
