@@ -10,7 +10,7 @@ from govai.analysis_io import digest
 from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids)
-from govai.opportunity_report import economic_summary, render_markdown, _safe as escape_text
+from govai.opportunity_report import business_text, economic_summary, render_markdown, _safe as escape_text
 from govai.processes import ProcessError
 
 
@@ -56,22 +56,47 @@ def render_opportunities(normalized, analysis):
                 if provider: provider.close()
             st.rerun()
         return
-    st.success('Отчёт готов.')
-    st.download_button('Скачать отчёт', lambda: render_markdown(artifact), type='primary',
-                       file_name='opportunity-report.md', mime='text/markdown', on_click='ignore', width='stretch')
+    # Eager immutable data avoids Streamlit's session-bound deferred download operation.
+    # Both files describe this same saved result; downloading never calls the model.
+    # Each export is independent: a presentation error must not hide the complete JSON.
+    try: json_data = json.dumps(artifact, ensure_ascii=False, indent=2).encode('utf-8')
+    except Exception: json_data = None
+    try: markdown_data = render_markdown(artifact).encode('utf-8')
+    except Exception: markdown_data = None
+    if markdown_data is not None:
+        st.success('Отчёт готов.')
+        st.download_button('Скачать отчёт', markdown_data, type='primary',
+                           file_name='opportunity-report.md', mime='text/markdown', on_click='ignore', width='stretch')
+    else:
+        st.error('Не удалось подготовить файл отчёта. Результат сохранён в текущей сессии; повторная генерация не нужна.'
+                 + (' Скачайте JSON для восстановления.' if json_data is not None else ''))
+    if json_data is not None:
+        st.download_button('Скачать данные анализа (JSON)', json_data,
+                           type='secondary' if markdown_data is not None else 'primary',
+                           file_name='opportunities.json', mime='application/json', on_click='ignore', width='stretch')
+    else:
+        st.warning('Не удалось подготовить JSON для восстановления. Данные остаются только в текущей сессии; '
+                   'повторная генерация не нужна.' + (' Сохраните доступный Markdown-отчёт.' if markdown_data is not None else ''))
+    if markdown_data is not None and json_data is not None:
+        st.caption('Сохраните оба файла. Без скачанной копии результат может быть потерян после завершения сессии.')
     report = artifact['report']
-    st.warning('Предварительные гипотезы требуют проверки. Без индивидуальных данных денежный эффект не оценён.'
+    st.warning('Перспективность пилота не доказывает окупаемость или готовность к внедрению. '
+               'Сценарные оценки — предположения для проверки, а не фактические показатели ведомства.'
                + (' Часть группировки процессов не подтверждена; это ограничивает числовые оценки.'
                   if report['normalization_status'] != 'completed' else ''))
-    st.caption(f"Инициатив: {len(report['initiatives'])}. Совокупный эффект не суммируется без подтверждения независимости.")
+    st.caption(f"Инициатив: {len(report['initiatives'])}. Эффекты разных инициатив не суммируются без подтверждения независимости.")
+    category = None
     for a in report['initiatives']:
+        prospect = a['prospect']
+        if prospect['category'] != category:
+            category = prospect['category']
+            st.subheader(prospect['label'])
         with st.container(border=True):
-            st.markdown(f"**{a['rank']}. {escape_text(a['title'])}**")
-            st.write(escape_text(a['ai_role']))
-            st.caption('Эффект: ' + a['effect_mechanism'])
-            st.caption(economic_summary(a))
-            st.caption(a['priority']['label'])
-            st.caption('Ограничение: ' + a['uncertainties'][0])
+            st.markdown(f"**{escape_text(business_text(a['title']))}**")
+            st.write(escape_text(business_text(a['ai_role'])))
+            st.caption(escape_text(business_text(prospect['reason'])))
+            st.caption('Эффект: ' + escape_text(economic_summary(a)))
+            st.caption('Что проверить: ' + escape_text(business_text(prospect['main_uncertainty'])))
     if not report['initiatives']: st.info(report['explanation'])
 
 
@@ -94,8 +119,6 @@ def render_opportunity_technical(normalized, analysis):
                    else 'Отчёт сформирован в текущей сессии.')
         st.json(artifact['metrics'])
         st.caption('Метрики относятся к сохранённому запуску; локальная пересборка не создаёт API-запросов.')
-        st.download_button('Скачать opportunities.json', lambda: json.dumps(artifact, ensure_ascii=False, indent=2),
-                           file_name='opportunities.json', mime='application/json', on_click='ignore')
     pending = st.session_state.get('opportunity_plans', {}).get(key)
     if pending:
         st.info('Структурированный план сохранён в памяти сессии, но отчёт ещё не готов. После потери сессии план недоступен.')

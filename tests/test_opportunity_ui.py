@@ -1,6 +1,8 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from govai.opportunities import generate_opportunities
@@ -44,7 +46,8 @@ def test_report_on_main_screen_no_reextract_renormalize_or_navigation_calls(monk
     monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
     with patch('streamlit.file_uploader',side_effect=uploader), patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider), \
          patch('govai.process_ui.extract_with_checkpoint',side_effect=AssertionError('No extraction')), \
-         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')):
+         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')), \
+         patch('streamlit.download_button',wraps=st.download_button) as download:
         app=load_saved_processes(AppTest.from_file(str(APP)))
         assert UIProvider.count==0
         button(app,'Сформировать отчёт').click().run()
@@ -53,7 +56,18 @@ def test_report_on_main_screen_no_reextract_renormalize_or_navigation_calls(monk
         assert len(app.session_state['opportunity_reports'])==1
         assert all(b.proto.ignore_rerun for b in app.get('download_button'))
         assert any(s.value=='Отчёт готов.' for s in app.success)
-        assert any(b.label=='Скачать отчёт' for b in app.get('download_button'))
+        labels={'Скачать отчёт','Скачать данные анализа (JSON)'}
+        shown=[b for b in app.get('download_button') if b.label in labels]
+        assert {b.label for b in shown}==labels
+        assert all(not b.proto.HasField('deferred_file_id') for b in shown)
+        technical=next(e for e in app.expander if e.label=='Технические данные')
+        assert not any(b.label in labels for b in technical.get('download_button'))
+        saved=next(iter(app.session_state['opportunity_reports'].values()))
+        data={c.args[0]:c.args[1] for c in download.call_args_list if c.args and c.args[0] in labels}
+        assert all(isinstance(value,bytes) for value in data.values())
+        assert json.loads(data['Скачать данные анализа (JSON)'])==saved
+        from govai.opportunity_report import render_markdown
+        assert data['Скачать отчёт'].decode('utf-8')==render_markdown(saved)
         assert not any(b.label=='Сформировать отчёт' for b in app.button)
         next(c for c in app.checkbox if c.label=='Показать исходный текст и структуру').check().run()
         app.run(); assert UIProvider.count==1
@@ -70,6 +84,101 @@ def test_saved_report_restores_without_key_or_generation(monkeypatch):
         assert not app.exception and not app.error
         assert next(iter(app.session_state['opportunity_reports'].values()))==saved
         app.run(); assert not app.exception
+
+
+def test_downloaded_json_restores_in_new_session_without_any_generation(monkeypatch):
+    _,n,_,uploader=inputs(); UIProvider.prepared=plan(proposal(n,['register'])); UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider), \
+         patch('streamlit.download_button',wraps=st.download_button) as download:
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Сформировать отчёт').click().run()
+        assert not app.exception and UIProvider.count==1
+        saved=next(iter(app.session_state['opportunity_reports'].values()))
+        downloaded=next(c.args[1] for c in reversed(download.call_args_list)
+                        if c.args and c.args[0]=='Скачать данные анализа (JSON)')
+        assert isinstance(downloaded,bytes)
+    _,_,_,restore_uploader=inputs(report=downloaded,normalized=n)
+    monkeypatch.delenv('OPENAI_API_KEY')
+    with patch('streamlit.file_uploader',side_effect=restore_uploader), \
+         patch('govai.opportunity_ui.generate_opportunities',side_effect=AssertionError('No report generation')), \
+         patch('govai.process_ui.extract_with_checkpoint',side_effect=AssertionError('No extraction')), \
+         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')):
+        restored=load_saved_processes(AppTest.from_file(str(APP)))
+        button(restored,'Восстановить отчёт').click().run()
+        assert not restored.exception and not restored.error
+        assert next(iter(restored.session_state['opportunity_reports'].values()))==saved
+        assert any(s.value=='Отчёт готов.' for s in restored.success)
+        assert any(b.label=='Скачать данные анализа (JSON)' for b in restored.get('download_button'))
+        restored.run(); assert UIProvider.count==1
+
+
+def test_main_cards_translate_internal_diagnostics_and_show_no_numeric_rank(monkeypatch):
+    _,n,_,uploader=inputs()
+    row=proposal(n,['register'])
+    row['prospect_assessment']['value_reason']='review: не объединено с a98'
+    row['prospect_assessment']['main_uncertainty']='incomplete; source_action_ids требуют проверки'
+    UIProvider.prepared=plan(row); UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider):
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Сформировать отчёт').click().run()
+        assert not app.exception and not app.error and UIProvider.count==1
+        visible_text=' '.join(str(e.value) for group in (app.caption,app.markdown,app.subheader,app.warning) for e in group)
+        assert 'Средняя перспективность' in visible_text
+        assert 'Границы операции и распределение ответственности требуют уточнения' in visible_text
+        assert all(token not in visible_text for token in ('review','incomplete','a98','source_action_ids','/100'))
+
+
+def test_markdown_preparation_failure_keeps_json_and_retries_locally(monkeypatch):
+    _,n,_,uploader=inputs(); UIProvider.prepared=plan(proposal(n,['register'])); UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider), \
+         patch('streamlit.download_button',wraps=st.download_button) as download:
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        with patch('govai.opportunity_ui.render_markdown',side_effect=RuntimeError('private export detail')):
+            button(app,'Сформировать отчёт').click().run()
+            assert not app.exception and UIProvider.count==1
+            assert any('Не удалось подготовить файл отчёта' in e.value for e in app.error)
+            assert all('private' not in e.value for e in app.error)
+            assert not any(s.value=='Отчёт готов.' for s in app.success)
+            assert not any(b.label=='Скачать отчёт' for b in app.get('download_button'))
+            backup=next(b for b in app.get('download_button') if b.label=='Скачать данные анализа (JSON)')
+            assert backup.proto.type=='primary' and backup.proto.ignore_rerun
+            saved=next(iter(app.session_state['opportunity_reports'].values()))
+            assert saved['plan']['proposals']
+            data=next(c.args[1] for c in reversed(download.call_args_list)
+                      if c.args and c.args[0]=='Скачать данные анализа (JSON)')
+            assert json.loads(data)==saved
+            app.run(); assert UIProvider.count==1
+        app.run()
+        assert not app.exception and not app.error and UIProvider.count==1
+        assert next(iter(app.session_state['opportunity_reports'].values()))==saved
+        assert any(s.value=='Отчёт готов.' for s in app.success)
+
+
+def test_json_preparation_failure_keeps_markdown_and_artifact_without_leaking_details(monkeypatch):
+    _,n,_,uploader=inputs(); UIProvider.prepared=plan(proposal(n,['register'])); UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    def broken_json(*args,**kwargs): raise TypeError('private serialization detail')
+    with patch('streamlit.file_uploader',side_effect=uploader), patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider):
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        with patch('govai.opportunity_ui.json',SimpleNamespace(dumps=broken_json)):
+            button(app,'Сформировать отчёт').click().run()
+            assert not app.exception and UIProvider.count==1
+            assert any('Не удалось подготовить JSON' in w.value for w in app.warning)
+            assert all('private' not in w.value for w in app.warning)
+            assert any(b.label=='Скачать отчёт' for b in app.get('download_button'))
+            assert not any(b.label=='Скачать данные анализа (JSON)' for b in app.get('download_button'))
+            saved=next(iter(app.session_state['opportunity_reports'].values()))
+            assert saved['plan']['proposals']
+            app.run(); assert UIProvider.count==1
+        app.run()
+        assert not app.exception and not app.error and UIProvider.count==1
+        assert next(iter(app.session_state['opportunity_reports'].values()))==saved
+        assert any(b.label=='Скачать данные анализа (JSON)' for b in app.get('download_button'))
 
 
 def test_failure_keeps_map_and_original_downloads(monkeypatch):
@@ -172,10 +281,11 @@ def test_main_three_step_flow_including_empty_llm_parameters(monkeypatch):
         button(app,'Сформировать отчёт').click().run()
         assert not app.exception and not app.error and UIProvider.count==1
         assert any(s.value=='Отчёт готов.' for s in app.success)
-        assert any(b.label=='Скачать отчёт' and b.proto.ignore_rerun for b in app.get('download_button'))
+        labels={'Скачать отчёт','Скачать данные анализа (JSON)'}
+        assert {b.label for b in app.get('download_button') if b.label in labels and b.proto.ignore_rerun}==labels
         technical=next(e for e in app.expander if e.label=='Технические данные')
         assert not technical.proto.expanded
-        assert not any(b.label=='Скачать отчёт' for b in technical.get('download_button'))
+        assert not any(b.label in labels for b in technical.get('download_button'))
         report=next(iter(app.session_state['opportunity_reports'].values()))
         assert report['plan']['proposals'][0]['required_parameters']==list(REQUIRED)
         app.run(); assert Extraction.calls==AutomaticNormalizer.calls_total==UIProvider.count==1
@@ -183,7 +293,7 @@ def test_main_three_step_flow_including_empty_llm_parameters(monkeypatch):
                document_upload('Другой нормативный документ.') if label=='Выберите документ' else None):
         app.run()
         assert not any(s.value=='Отчёт готов.' for s in app.success)
-        assert not any(b.label=='Скачать отчёт' for b in app.get('download_button'))
+        assert not any(b.label in labels for b in app.get('download_button'))
         assert button(app,'Сформировать отчёт').disabled
 
 

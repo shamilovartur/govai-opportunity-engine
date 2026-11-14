@@ -4,7 +4,8 @@ from decimal import Decimal
 import pytest
 
 from govai.economics import (REQUIRED, Parameter, Scenario, UNITS, calculate_scenario, assess_economics,
-                             illustrative_scenarios, unknown_parameters, portfolio_assessment)
+                             illustrative_scenarios, unknown_parameters, portfolio_assessment,
+                             EFFECT_UNITS, required_parameters, calculate_effect_scenario, assess_effect)
 from govai.processes import ProcessError
 
 
@@ -109,3 +110,145 @@ def test_even_single_conditional_estimate_explains_unavailable_portfolio_total()
     assert result['total_capacity_equivalent'] is None
     assert result['excluded_from_total'][0]['initiative_id'] == 'one'
     assert result['excluded_from_total'][0]['reasons']
+
+
+def effect_case(name='base', origin='illustrative', **values):
+    return {'name': name, 'parameters': {key: {'value': value, 'unit': EFFECT_UNITS[key],
+        'origin': origin if value is not None else 'unknown', 'evidence_refs': [],
+        'note': ('Индивидуальное допущение: чтение двух документов, сопоставление и проверка специалистом.'
+                 if value is not None else 'Предстоит измерить на ограниченном пилоте.')}
+        for key, value in values.items()}}
+
+
+def test_scoped_labor_hours_need_neither_salary_nor_annual_workload():
+    source = effect_case(case_count='1000', before_minutes='20', after_minutes='12')
+    original = deepcopy(source)
+    result = calculate_effect_scenario('labor_time', source, metric_unit='hours')
+    assert source == original
+    assert result['results']['released_hours'] == {
+        'value': '133.33', 'unit': 'hours', 'formula': 'case_count * saved_minutes / 60'}
+    assert result['results']['saved_minutes']['value'] == '8.00'
+    assert result['status'] == 'illustrative' and result['budget_savings'] is None
+    assert set(result['parameters']) == {'before_minutes', 'after_minutes', 'case_count'}
+    assert all(p['origin'] == 'illustrative' for p in result['parameters'].values())
+
+
+def test_per_case_time_does_not_invent_volume_and_hours_require_explicit_count():
+    source = effect_case(before_minutes='20', after_minutes='12')
+    per_case = calculate_effect_scenario('labor_time', source)
+    hours = calculate_effect_scenario('labor_time', source, metric_unit='hours')
+    assert per_case['results']['saved_minutes']['value'] == '8.00'
+    assert per_case['results']['released_hours']['value'] is None
+    assert per_case['status'] == 'illustrative' and per_case['missing_parameters'] == []
+    assert hours['status'] == 'needs_data' and hours['missing_parameters'] == ['case_count']
+    assert required_parameters('labor_time') == ['before_minutes', 'after_minutes']
+    assert required_parameters('labor_time', metric_unit='hours') == ['before_minutes', 'after_minutes', 'case_count']
+
+
+def test_applicability_is_explicit_for_all_cases_and_never_repeated_for_eligible_cases():
+    source = effect_case(case_count='1000', before_minutes='20', after_minutes='12', applicability='0.5')
+    with pytest.raises(ProcessError): calculate_effect_scenario('labor_time', source)
+    result = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert result['results']['released_hours']['value'] == '66.67'
+    assert result['results']['saved_minutes']['value'] == '4.00'
+    source['parameters'].pop('applicability')
+    unknown = calculate_effect_scenario('labor_time', source, population='all_cases')
+    assert unknown['results']['released_hours']['value'] is None
+    assert unknown['results']['saved_minutes']['value'] is None
+    assert unknown['missing_parameters'] == ['applicability']
+
+
+def test_scoped_negative_effect_and_unknown_after_time_are_not_hidden():
+    source = effect_case(case_count='1000', before_minutes='12', after_minutes='20')
+    result = calculate_effect_scenario('labor_time', source)
+    assert result['results']['released_hours']['value'] == '-133.33'
+    assert result['results']['saved_minutes']['value'] == '-8.00'
+    assert 'отрицательный эффект' in result['warnings'][-1]
+    source['parameters']['after_minutes'].update(value=None, origin='unknown')
+    result = calculate_effect_scenario('labor_time', source)
+    assert all(p['value'] is None for p in result['results'].values())
+
+
+@pytest.mark.parametrize('mutation', ['unit', 'share', 'note', 'origin', 'infinity', 'money'])
+def test_scoped_parameters_are_not_exempt_from_validation(mutation):
+    source = effect_case(case_count='1000', before_minutes='20', after_minutes='12', applicability='0.5')
+    if mutation == 'unit': source['parameters']['before_minutes']['unit'] = 'days'
+    elif mutation == 'share': source['parameters']['applicability']['value'] = '1.2'
+    elif mutation == 'note': source['parameters']['before_minutes']['note'] = ' '
+    elif mutation == 'origin': source['parameters']['before_minutes']['origin'] = 'unknown'
+    elif mutation == 'infinity': source['parameters']['before_minutes']['value'] = 'Infinity'
+    else: source['parameters']['hour_cost'] = source['parameters']['before_minutes']
+    with pytest.raises(ProcessError): calculate_effect_scenario('labor_time', source, population='all_cases')
+
+
+def test_elapsed_time_is_a_distinct_metric_with_no_labor_or_money_claim():
+    result = calculate_effect_scenario('elapsed_time', effect_case(
+        before_elapsed_minutes='1440', after_elapsed_minutes='1320'))
+    assert result['results'] == {'saved_elapsed_minutes': {'value': '120.00', 'unit': 'minutes/process',
+                                  'formula': 'before_elapsed_minutes - after_elapsed_minutes'}}
+    assert 'не рабочие минуты' in result['warnings'][0]
+    assert result['budget_savings'] is None
+    with pytest.raises(ProcessError): calculate_effect_scenario('elapsed_time', effect_case(before_minutes='20'))
+
+
+def test_quality_without_observations_has_a_measurement_plan_and_no_fake_improvement():
+    result = assess_effect('qualitative')
+    assert result['status'] == 'needs_data' and not result['scenarios']
+    assert result['required_parameters'] == [] and result['input_parameters'] == {}
+    assert 'метрике качества' in result['reasons'][0]
+    with pytest.raises(ProcessError):
+        assess_effect('qualitative', scenarios=[effect_case(before_minutes='20', after_minutes='12')])
+
+
+def test_individual_time_scenarios_keep_assumptions_separate_from_observed_facts():
+    cases = [effect_case(name, case_count='1000', before_minutes='20', after_minutes=after)
+             for name, after in [('conservative', '16'), ('base', '12'), ('optimistic', '10')]]
+    result = assess_effect('labor_time', metric_unit='hours', scenarios=cases)
+    assert result['status'] == 'illustrative'
+    assert [s['results']['released_hours']['value'] for s in result['scenarios']] == ['66.67', '133.33', '166.67']
+    assert all(p['value'] is None for p in result['input_parameters'].values())
+    assert all(p['origin'] == 'illustrative' for s in result['scenarios'] for p in s['parameters'].values())
+    assert 'не являются измеренными' in result['reasons'][0]
+    missing = assess_effect('labor_time', metric_unit='hours')
+    assert missing['status'] == 'needs_data' and not missing['scenarios']
+    assert set(missing['required_parameters']) == {'before_minutes', 'after_minutes', 'case_count'}
+
+
+def test_three_scenario_names_without_distinct_premises_are_rejected():
+    cases = [effect_case(name, before_minutes='20', after_minutes='12')
+             for name in ('conservative', 'base', 'optimistic')]
+    with pytest.raises(ProcessError, match='числовыми предпосылками'):
+        assess_effect('labor_time', scenarios=cases)
+    with pytest.raises(ProcessError, match='три различных сценария'):
+        assess_effect('labor_time', scenarios=cases[:2])
+
+
+def test_scoped_values_do_not_override_measurement_restrictions():
+    cases = [effect_case(name, before_minutes='20', after_minutes=after)
+             for name, after in [('conservative', '16'), ('base', '12'), ('optimistic', '10')]]
+    result = assess_effect('labor_time', scenarios=cases, blocked_reasons=['Границы работы не определены.'])
+    assert result['status'] == 'needs_data' and not result['scenarios']
+    assert result['reasons'] == ['Границы работы не определены.']
+
+
+def test_scenario_names_or_numeric_formatting_do_not_create_distinct_premises():
+    from govai.economics import assess_effect
+    cases=[]
+    for name,value in zip(('conservative','base','optimistic'),('20','20.0','20.00')):
+        cases.append({'name':name,'parameters':{
+            'before_minutes':{'value':value,'origin':'illustrative','unit':'minutes/case','note':'Один и тот же условный замер.','evidence_refs':[]},
+            'after_minutes':{'value':'12','origin':'illustrative','unit':'minutes/case','note':'Один и тот же условный замер.','evidence_refs':[]}}})
+    with pytest.raises(ProcessError,match='различаться'):
+        assess_effect('labor_time',scenarios=cases)
+
+
+def test_new_effect_stage_validates_annual_scenarios_even_if_financial_scope_is_blocked():
+    from govai.economics import assess_effect
+    cases=[s.model_dump() for s in illustrative_scenarios()]
+    cases[0]['parameters']['hour_cost']['unit']='minutes/case'
+    with pytest.raises(ProcessError):
+        assess_effect('time_capacity',scenarios=cases,blocked_reasons=['Не установлены границы работы.'])
+    cases=[s.model_dump() for s in illustrative_scenarios()]
+    for i in (1,2): cases[i]['parameters']=deepcopy(cases[0]['parameters'])
+    with pytest.raises(ProcessError,match='различаться'):
+        assess_effect('time_capacity',scenarios=cases)

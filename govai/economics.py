@@ -1,4 +1,4 @@
-"""Pure, auditable capacity calculations. No LLM numbers and no budget-saving claim."""
+"""Pure, auditable effect calculations with explicit premises and no budget-saving claim."""
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from itertools import combinations
@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 
 from govai.processes import ProcessError, StrictModel
 
-METHOD_VERSION = 'capacity-1.1'
+METHOD_VERSION = 'effect-2.0'
 UNITS = {
     'annual_cases': 'cases/year', 'applicability': 'share', 'adoption': 'share',
     'before_minutes': 'minutes/case', 'after_minutes': 'minutes/case', 'realization': 'share',
@@ -29,6 +29,11 @@ OUTPUT_UNITS = {'used_cases': 'cases/year', 'released_hours': 'hours/year',
                 'annual_net_capacity_equivalent': 'RUB/year',
                 'first_year_net_capacity_equivalent': 'RUB/first_year'}
 SCENARIOS = ('conservative', 'base', 'optimistic')
+EFFECT_UNITS = {
+    'case_count': 'cases', 'before_minutes': 'minutes/case', 'after_minutes': 'minutes/case',
+    'applicability': 'share', 'before_elapsed_minutes': 'minutes/process',
+    'after_elapsed_minutes': 'minutes/process',
+}
 
 
 class Parameter(StrictModel):
@@ -40,6 +45,8 @@ class Parameter(StrictModel):
 
     @model_validator(mode='after')
     def consistent(self):
+        if not self.note.strip():
+            raise ValueError('A parameter needs an explanation.')
         if (self.value is None) != (self.origin == 'unknown'):
             raise ValueError('Unknown is not zero; known values need provenance.')
         if self.origin == 'document' and not self.evidence_refs:
@@ -122,11 +129,17 @@ def calculate_scenario(scenario: Scenario | dict) -> dict:
         raise ProcessError('Некорректные параметры экономики: проверьте происхождение, единицы, доли и конечные числа.') from exc
 
 
-def required_parameters(model):
+def required_parameters(model, population='eligible_cases', *, metric_unit=None):
     """Service metadata is derived from the calculator, never required from an LLM."""
-    if model not in ('time_capacity', 'qualitative'):
-        raise ProcessError('Неизвестная экономическая модель.')
-    return list(REQUIRED) if model == 'time_capacity' else []
+    if population not in ('eligible_cases', 'all_cases'):
+        raise ProcessError('Неизвестна база количества случаев.')
+    if model == 'time_capacity': return list(REQUIRED)
+    if model == 'qualitative': return []
+    if model == 'elapsed_time': return ['before_elapsed_minutes', 'after_elapsed_minutes']
+    if model == 'labor_time':
+        return ['before_minutes', 'after_minutes'] + (['applicability'] if population == 'all_cases' else []) + (
+            ['case_count'] if metric_unit == 'hours' else [])
+    raise ProcessError('Неизвестная модель эффекта.')
 
 
 def assess_economics(model, *, blocked_reasons=(), scenarios=None, allow_illustrative=False):
@@ -153,6 +166,107 @@ def assess_economics(model, *, blocked_reasons=(), scenarios=None, allow_illustr
             'required_parameters': [k for k, p in actual.items() if p['value'] is None],
             'reasons': [] if supplied else ['Все числа сценария иллюстративные; фактические показатели неизвестны.',
                 'Наличие измеряемого человеческого этапа — допущение сценария, а не вывод о ручной работе из НПА.']}
+
+
+def _effect_units(model, population):
+    names = required_parameters(model, population)
+    if model == 'labor_time': names = [*names, 'case_count']
+    return {name: EFFECT_UNITS[name] for name in names}
+
+
+def _unknown_effect_parameters(model, population):
+    return {name: Parameter(value=None, origin='unknown', unit=unit,
+        note='Нужны замеры или явно обоснованные индивидуальные предпосылки.', evidence_refs=[]).model_dump()
+        for name, unit in _effect_units(model, population).items()}
+
+
+def calculate_effect_scenario(model, scenario: Scenario | dict, *, population='eligible_cases', metric_unit=None):
+    """Calculate one scoped effect. Cases are a stated sample, never an invented annual workload."""
+    if model == 'time_capacity': return calculate_scenario(scenario)
+    required = required_parameters(model, population, metric_unit=metric_unit)
+    if model == 'qualitative':
+        raise ProcessError('Для показателя качества без наблюдений нужен план измерения, а не числовой прогноз.')
+    try:
+        s = Scenario.model_validate(scenario)
+        units = _effect_units(model, population)
+        if set(s.parameters) - set(units):
+            raise ValueError('Unknown parameter or repeated applicability for eligible cases.')
+        params = {**_unknown_effect_parameters(model, population),
+                  **{name: value.model_dump() for name, value in s.parameters.items()}}
+        for name, p in params.items():
+            if p['unit'] != units[name]: raise ValueError('Wrong unit')
+            if units[name] == 'share' and p['value'] is not None and Decimal(p['value']) > 1:
+                raise ValueError('Share exceeds one')
+        values = {name: Decimal(p['value']) if p['value'] is not None else None for name, p in params.items()}
+        def compute(names, calculation):
+            return calculation(*(values[name] for name in names)) if all(values[name] is not None for name in names) else None
+        with localcontext() as ctx:
+            ctx.prec, ctx.rounding = 60, ROUND_HALF_EVEN
+            if model == 'labor_time':
+                minutes = ['before_minutes', 'after_minutes'] + (['applicability'] if population == 'all_cases' else [])
+                values['saved_minutes'] = compute(minutes, lambda before, after, share=Decimal(1): (before-after)*share)
+                values['released_hours'] = compute(['case_count', 'saved_minutes'], lambda cases, minutes: cases*minutes/60)
+                formulas = {'saved_minutes': ('minutes/case', '(before_minutes - after_minutes)' +
+                    (' * applicability' if population == 'all_cases' else '')),
+                    'released_hours': ('hours', 'case_count * saved_minutes / 60')}
+                warning = 'Минуты после включают проверку и исправление результата специалистом; нормативный срок не является трудозатратами.'
+                if population == 'all_cases':
+                    warning += ' Показатель на один случай взвешен по явно указанной доле применимости.'
+            else:
+                values['saved_elapsed_minutes'] = compute(['before_elapsed_minutes', 'after_elapsed_minutes'], lambda before, after: before-after)
+                formulas = {'saved_elapsed_minutes': ('minutes/process', 'before_elapsed_minutes - after_elapsed_minutes')}
+                warning = 'Время прохождения относится только к указанным границам процесса; это не рабочие минуты сотрудника и не срок всей услуги.'
+            results = {}
+            for name, (unit, formula) in formulas.items():
+                value = values[name]
+                rounded = value.quantize(Decimal('0.01')) if value is not None else None
+                results[name] = {'value': None if rounded is None else format(abs(rounded) if rounded == 0 else rounded, 'f'),
+                                 'unit': unit, 'formula': formula}
+        missing = [name for name in required if params[name]['value'] is None]
+        illustrative = any(p['origin'] == 'illustrative' for p in params.values())
+        return {'name': s.name, 'status': 'needs_data' if missing else 'illustrative' if illustrative else 'conditional_estimate',
+            'population': population, 'parameters': params, 'missing_parameters': missing, 'results': results,
+            'budget_savings': None, 'budget_savings_reason': 'Измерение времени не доказывает сокращение расходов бюджета.',
+            'warnings': [warning] + (['При заданных предпосылках время увеличивается; отрицательный эффект сохранён.']
+                if any(values[name] is not None and values[name] < 0 for name in formulas) else [])}
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        raise ProcessError('Некорректные параметры эффекта: проверьте единицы, происхождение, долю применимости и конечные числа.') from exc
+
+
+def assess_effect(model, *, population='eligible_cases', metric_unit=None, blocked_reasons=(), scenarios=None):
+    """Assess a single primary metric; no default workload, salary, cost or quality improvement."""
+    required = required_parameters(model, population, metric_unit=metric_unit)
+    if model == 'qualitative' and scenarios:
+        raise ProcessError('Для показателя качества без наблюдений нужен план измерения, а не числовой прогноз.')
+    unknown = unknown_parameters() if model == 'time_capacity' else _unknown_effect_parameters(model, population)
+    results, parsed = [], None
+    if scenarios is not None and model != 'qualitative':
+        try: parsed = [Scenario.model_validate(s) for s in scenarios]
+        except (ValueError, TypeError) as exc:
+            raise ProcessError('Некорректные параметры сценариев эффекта.') from exc
+        if len(parsed) != 3 or {s.name for s in parsed} != set(SCENARIOS):
+            raise ProcessError('Нужны три различных сценария: консервативный, базовый и оптимистичный.')
+        premises = {tuple(sorted((name, Decimal(p.value) if p.value is not None else None)
+                                 for name, p in s.parameters.items())) for s in parsed}
+        if any(p.value is not None for s in parsed for p in s.parameters.values()) and len(premises) != 3:
+            raise ProcessError('Сценарии должны различаться явными числовыми предпосылками, а не только названиями.')
+        if model != 'time_capacity' or blocked_reasons:
+            results = [calculate_effect_scenario(model, s, population=population, metric_unit=metric_unit) for s in parsed]
+    if model == 'time_capacity':
+        return assess_economics(model, blocked_reasons=blocked_reasons, scenarios=parsed)
+    if blocked_reasons or not results:
+        return {'model': model, 'status': 'needs_data', 'scenarios': [], 'input_parameters': unknown,
+            'required_parameters': required, 'reasons': list(blocked_reasons) or [
+                'Нужны наблюдения и проверка по указанной метрике качества; числовое улучшение не прогнозируется.' if model == 'qualitative'
+                else 'Индивидуальные предпосылки не предоставлены; сохранены метрика и план измерения.']}
+    base = next(s for s in results if s['name'] == 'base')
+    actual = {name: p if p['origin'] in ('document', 'user') else unknown[name] for name, p in base['parameters'].items()}
+    return {'model': model, 'status': 'needs_data' if any(s['status'] == 'needs_data' for s in results)
+            else 'illustrative' if any(s['status'] == 'illustrative' for s in results) else 'conditional_estimate',
+            'scenarios': results, 'input_parameters': actual,
+            'required_parameters': [name for name in required if actual[name]['value'] is None],
+            'reasons': ['Сценарные допущения не являются измеренными показателями ведомства.']
+                if any(s['status'] == 'illustrative' for s in results) else []}
 
 
 def portfolio_assessment(initiatives, relationships, *, incomplete_input=False):

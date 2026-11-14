@@ -29,6 +29,51 @@ def simple_map(lines=('Специалист анализирует заявле�
     return doc, raw, analysis, normalized
 
 
+def prospect_assessment(**changes):
+    value = {'value_case': 'concrete',
+        'value_reason': 'Есть содержательное сопоставление документов, которое не сводится к проверке реквизитов.',
+        'pilot_feasibility': 'needs_preparation',
+        'pilot_reason': 'Для ограниченного пилота сначала подтвердить доступ к обезличенным примерам одной процедуры.',
+        'main_uncertainty': 'Готовность корпуса и состав документов неизвестны.',
+        'change_condition': 'Если доступен экспертно размеченный корпус, можно начать ограниченный пилот.',
+        'pilot': 'Сравнить помощь ИИ и обычный поиск на обезличенных законченных делах одной процедуры без отправки решений.',
+        'success_criterion': 'Меньше времени на проверенный проект, без пропуска существенных обстоятельств и неподтверждённых выводов.'}
+    value.update(changes)
+    return value
+
+
+def measurement(normalized, aids, model='labor_time', **changes):
+    category, unit, name = {
+        'time_capacity': ('money', 'RUB/year', 'Годовой денежный эквивалент высвобождённой мощности'),
+        'labor_time': ('labor', 'minutes/case', 'Рабочие минуты на проверенный проект'),
+        'elapsed_time': ('elapsed_time', 'minutes/process', 'Время прохождения выбранного этапа'),
+        'qualitative': ('quality', 'share', 'Доля выводов с корректным подтверждением'),
+    }[model]
+    value = {'source_action_ids': list(dict.fromkeys(sid for a in normalized['map']['actions'] if a['id'] in aids for sid in a['source_action_ids'])),
+        'work': 'Поиск оснований, сопоставление материалов и проверка проекта ответа.',
+        'case_unit': 'Один законченный комплект документов выбранного вида.',
+        'boundary': 'От начала чтения до проверенного проекта; отправка и административное решение не включаются.',
+        'population': 'all_cases' if model == 'time_capacity' else 'eligible_cases',
+        'primary': {'category': category, 'name': name, 'unit': unit}, 'secondary': None,
+        'method': 'Сравнить контрольную обработку и работу с ИИ на одинаковых обезличенных материалах; эксперт проверяет результат.',
+        'success_criterion': 'Проверенный результат без дополнительных существенных ошибок при меньших трудозатратах.',
+        'human_review_included': True, 'time_scenarios': []}
+    value.update(changes)
+    return value
+
+
+def labor_assumptions():
+    rows = []
+    for name, before, after, note in [
+        ('conservative', '20', '16', 'Сложные формулировки требуют полной перепроверки и значительных правок проекта.'),
+        ('base', '20', '12', 'Читаемый типовой комплект; проверка извлечения и исправление проекта остаются специалисту.'),
+        ('optimistic', '20', '10', 'Однотипный читаемый комплект, но источники и проект всё равно проверяет специалист.')]:
+        rows.append({'name': name, 'rationale': note, **{key: {
+            'value': value, 'origin': 'illustrative', 'unit': 'minutes/case',
+            'note': note, 'evidence_refs': []} for key, value in [('before_minutes', before), ('after_minutes', after)]}})
+    return rows
+
+
 def proposal(normalized, aids=None, key='pilot', **changes):
     aids = aids or [a['id'] for a in normalized['map']['actions'] if a['kind'] == 'operation'][:1]
     refs = list(dict.fromkeys(e for a in normalized['map']['actions'] if a['id'] in aids for e in a['evidence_refs']))
@@ -46,10 +91,11 @@ def proposal(normalized, aids=None, key='pilot', **changes):
         'novelty': 'new_support', 'incremental_value': None, 'economic_model': 'time_capacity',
         'effect_mechanism': 'Сокращение времени поиска и чернового составления за вычетом проверки человеком.',
         'required_parameters': list(REQUIRED),
-        'priority': {'integration_complexity': 'low', 'data_readiness': 'unknown', 'delivery_effort': 'small',
-                     'risk': 'medium', 'priority_basis': 'Пилот без записи в ведомственные системы; готовность корпуса неизвестна.'},
+        'prospect_assessment': prospect_assessment(),
         'uncertainties': ['Реальный объём, рабочие минуты, наличие аналогичных систем и качество корпуса неизвестны.']}
     value.update(changes)
+    if 'measurement' not in changes:
+        value['measurement'] = measurement(normalized, aids, value['economic_model'])
     return value
 
 
@@ -73,8 +119,8 @@ def three_proposals(normalized):
         effect_mechanism='Меньше времени на сопоставление версий; экспертная квалификация ошибки остаётся человеку.',
         conditions=['Связанные версии исходных и выданных документов, проверенные примеры ошибок, защищённый доступ.']),
         proposal(normalized, ['answer'], key='grounded-reply', title='Проект обоснованного ответа заявителю')]
-    items[0]['priority'].update(integration_complexity='medium', delivery_effort='medium')
-    items[1]['priority'].update(integration_complexity='medium', delivery_effort='medium', risk='high')
+    items[0]['prospect_assessment']['main_uncertainty'] = 'Подтвердить доступ к обезличенным комплектам документов.'
+    items[1]['prospect_assessment']['main_uncertainty'] = 'Уточнить границу исправления технической ошибки и пересмотра решения.'
     return OpportunityPlan(proposals=items, rejected=[], relationships=[], explanation='Ручной тестовый план на реальных фрагментах приказа, не вызов LLM.')
 
 

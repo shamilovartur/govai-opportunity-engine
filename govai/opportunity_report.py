@@ -1,74 +1,62 @@
-"""Deterministic, inspectable prioritization and a compact executive Markdown report."""
+"""A short qualitative rubric and a management report over verified Python results."""
 
 import re
 from decimal import Decimal
 
-from govai.economics import FORMULAS, UNITS
-from govai.analysis_io import digest
-
-PRIORITY_VERSION = 'priority-1.1'
-PRIORITY_RULES = {
-    'weights': {'economic': 25, 'feasibility': 20, 'data': 15, 'delivery': 10, 'risk': 20, 'reliability': 10},
-    'feasibility': {'low': 5, 'medium': 3, 'high': 1, 'unknown': 0},
-    'data': {'ready': 5, 'partial': 2, 'missing': 0, 'unknown': 0},
-    'delivery': {'small': 5, 'medium': 3, 'large': 1, 'unknown': 0},
-    'risk': {'low': 5, 'medium': 2, 'high': 0, 'unknown': 0},
-    'reliability': {'document': 4, 'user': 3, 'illustrative': 0, 'unknown': 0},
-    'economic_metric': 'annual_net_capacity_equivalent',
-    'economic_thresholds_RUB_per_year': [0, 100000, 300000, 1000000, 3000000],
-    'high_threshold': 75, 'preparation_threshold': 30,
-    'high_minimum_economic_score': 3, 'high_requires_positive_first_year': True,
-    'unknown_policy': 'zero_without_weight_redistribution',
-    'illustrative_economic_score': 0,
+PROSPECT_VERSION = 'prospect-1.0'
+PROSPECT_RULES = {
+    'insufficient': 'Механизм добавочной ценности неясен или возможность ограниченного пилота неизвестна.',
+    'low': 'Добавочная ценность слаба либо ограниченный пилот пока не обоснован.',
+    'medium': 'Механизм конкретен, но перед пилотом нужно устранить существенную неопределённость.',
+    'high': 'Механизм конкретен; предложен ограниченный измеримый пилот с контролем рисков.',
+    'unknown_data': 'Неизвестная готовность данных отражается в неопределённости, а не автоматически в низкой категории.',
+    'scope': 'Перспективность дальнейшей проработки не означает доказанную окупаемость или готовность к внедрению.',
 }
-CATEGORIES = {'pilot_candidate': 'Кандидат на быстрый пилот после проверки предпосылок',
-              'preparation': 'Перспективная инициатива, требующая подготовки',
-              'deferred': 'Отложить до подтверждения предпосылок'}
+CATEGORIES = {'high': 'Высокая перспективность', 'medium': 'Средняя перспективность',
+              'low': 'Низкая перспективность', 'insufficient': 'Недостаточно оснований для оценки'}
 SCENARIO_LABELS = {'conservative': 'Консервативный', 'base': 'Базовый', 'optimistic': 'Оптимистичный'}
-ORIGINS = {'document': 'Указано в документе', 'user': 'Предоставлено пользователем',
-           'illustrative': 'Иллюстративное допущение', 'unknown': 'Неизвестно'}
-PARAMETERS = {'annual_cases': 'Объём за год', 'applicability': 'Доля применимых случаев',
-    'adoption': 'Доля использования', 'before_minutes': 'Минут работы до', 'after_minutes': 'Минут работы после, включая проверку',
+ORIGINS = {'document': 'Подтверждено документом', 'user': 'Предоставлено пользователем',
+           'illustrative': 'Сценарное допущение', 'unknown': 'Неизвестно'}
+PARAMETERS = {'annual_cases': 'Обращений за год', 'case_count': 'Число случаев в расчёте',
+    'applicability': 'Доля подходящих случаев', 'adoption': 'Доля использования',
+    'before_minutes': 'Работа до', 'after_minutes': 'Работа после, с проверкой и исправлением',
+    'before_elapsed_minutes': 'Длительность этапа до', 'after_elapsed_minutes': 'Длительность этапа после',
     'realization': 'Коэффициент достижения эффекта', 'hour_cost': 'Полная стоимость часа',
-    'annual_fixed_opex': 'Постоянные расходы в год', 'variable_cost_per_case': 'Расходы на обработанный случай',
+    'annual_fixed_opex': 'Постоянные расходы за год', 'variable_cost_per_case': 'Расходы на случай',
     'implementation_cost': 'Единовременное внедрение'}
+UNIT_LABELS = {'minutes/case': 'человеко-минут на случай', 'hours': 'человеко-часов',
+    'minutes/process': 'минут на этап', 'share': 'доля', 'cases': 'случаев', 'cases/year': 'случаев/год',
+    'RUB/hour': 'руб./час', 'RUB/year': 'руб./год', 'RUB/case': 'руб./случай', 'RUB': 'руб.'}
 
 
-def rank_initiatives(initiatives, *, incomplete_input=False):
-    ranked = []
+def assess_prospects(initiatives, *, incomplete_input=False):
+    """Apply a visible nonnumeric rubric; preserve order within each category.
+
+    Source uncertainty is retained by the report, not converted to a penalty for
+    every hypothesis. The assessment's substantive claims still require review.
+    """
+    assessed = []
     for initiative in initiatives:
-        a = initiative['priority_assessment']; econ = initiative['economics']
-        base = next((s for s in econ['scenarios'] if s['name'] == 'base'), None)
-        economic, reliability = 0, 0
-        if base and base['status'] == 'conditional_estimate' and econ['status'] == 'conditional_estimate':
-            amount = base['results']['annual_net_capacity_equivalent']['value']
-            economic = sum(Decimal(amount) > Decimal(t) for t in PRIORITY_RULES['economic_thresholds_RUB_per_year']) if amount is not None else 0
-            reliability = min(PRIORITY_RULES['reliability'][p['origin']] for p in base['parameters'].values())
-        scores = {'economic': economic, 'feasibility': PRIORITY_RULES['feasibility'][a['integration_complexity']],
-                  'data': PRIORITY_RULES['data'][a['data_readiness']], 'delivery': PRIORITY_RULES['delivery'][a['delivery_effort']],
-                  'risk': PRIORITY_RULES['risk'][a['risk']], 'reliability': reliability}
-        contributions = {k: float(Decimal(v) * Decimal(PRIORITY_RULES['weights'][k]) / 5) for k, v in scores.items()}
-        total = round(sum(contributions.values()), 2)
-        unknown = [k for k, v in a.items() if v == 'unknown']
-        first_year = base['results']['first_year_net_capacity_equivalent']['value'] if base else None
-        if (total >= PRIORITY_RULES['high_threshold'] and reliability >= 3
-                and economic >= PRIORITY_RULES['high_minimum_economic_score']
-                and first_year is not None and Decimal(first_year) > 0
-                and not incomplete_input and not unknown and a['risk'] == 'low'):
-            category = 'pilot_candidate'
-        elif total >= PRIORITY_RULES['preparation_threshold']:
-            category = 'preparation'
+        a = initiative['prospect_assessment']
+        if a['value_case'] not in ('concrete', 'weak', 'unclear') or a['pilot_feasibility'] not in (
+                'bounded', 'needs_preparation', 'not_justified', 'unknown'):
+            raise ValueError('Неизвестное основание качественной оценки.')
+        if a['value_case'] == 'unclear' or a['pilot_feasibility'] == 'unknown':
+            category = 'insufficient'
+        elif a['value_case'] == 'weak' or a['pilot_feasibility'] == 'not_justified':
+            category = 'low'
+        elif a['pilot_feasibility'] == 'needs_preparation':
+            category = 'medium'
         else:
-            category = 'deferred'
-        ranked.append({**initiative, 'priority': {'score': total, 'category': category,
-            'label': CATEGORIES[category], 'scores_0_to_5': scores, 'weighted_contributions': contributions,
-            'weights': PRIORITY_RULES['weights'], 'unknown_criteria': unknown, 'preliminary': True,
-            'reason': a['priority_basis'],
-            'limitations': (['Количественная часть не оценена: финансовых оснований или индивидуальных параметров недостаточно.']
-                           if econ['status'] == 'needs_data' else []) + ['Оценки интеграции, готовности данных, сроков пилота и рисков — гипотезы модели.',
-                           'Иллюстративная экономика не повышает экономический балл; неизвестные критерии дают 0.']}})
-    ranked.sort(key=lambda a: (-a['priority']['score'], a['id']))
-    return [{**a, 'rank': i+1} for i, a in enumerate(ranked)]
+            category = 'high'
+        assessed.append({**initiative, 'prospect': {
+            'category': category, 'label': CATEGORIES[category],
+            'reason': ' '.join((a['value_reason'].strip(), a['pilot_reason'].strip())),
+            'main_uncertainty': a['main_uncertainty'], 'change_condition': a['change_condition'],
+            'pilot': a['pilot'], 'success_criterion': a['success_criterion'], 'preliminary': True,
+        }})
+    # These are named groups, not scores or ordinal places within a group.
+    return [a for category in CATEGORIES for a in assessed if a['prospect']['category'] == category]
 
 
 def _safe(value):
@@ -76,130 +64,231 @@ def _safe(value):
     return re.sub(r'([\\`*_{}\[\]()#+.!<>|])', r'\\\1', ' '.join(str(value).split()))
 
 
+def business_text(value):
+    """Keep internal reconciliation diagnostics in JSON, translate their significance."""
+    text = ' '.join(str(value).split())
+    text = re.sub(r',?\s*включая записи с mode=[A-Za-z_]+', '', text)
+    if re.search(r'\b(?:review|requires_review|review_reasons|incomplete|action[_-][\w-]+|context_action_ids|source_action_ids|a\d+)\b|mode=|не объединен[оаы]?|не объединён[оаы]?', text, re.I):
+        return 'Границы операции и распределение ответственности требуют уточнения.'
+    return text
+
+
+def _business(value):
+    return _safe(business_text(value))
+
+
+def _brief(value, words=16):
+    text = business_text(value)
+    parts = text.split()
+    return _safe(text if len(parts) <= words else ' '.join(parts[:words]).rstrip('.,;:') + '…')
+
+
+def _first_sentence(value):
+    return re.split(r'(?<=[.!?])\s+', business_text(value), maxsplit=1)[0]
+
+
 def _number(value):
-    return 'Требуются данные' if value is None else format(Decimal(value), ',.2f').replace(',', ' ')
+    if value is None:
+        return 'неизвестно'
+    return format(Decimal(value), ',.2f').replace(',', ' ').replace('.', ',')
+
+
+def _metric_name(initiative):
+    primary = initiative['measurement']['primary']
+    return business_text(primary['name']) + ' (' + UNIT_LABELS.get(primary['unit'], primary['unit']) + ')'
+
+
+def _result_summary(initiative, scenario):
+    """Display only calculated, unit-specific results; never invent a missing operand."""
+    results = scenario['results']; model = initiative['economics']['model']
+    measurement = initiative['measurement']
+    if model == 'labor_time':
+        hours = results.get('released_hours', {}).get('value')
+        minutes = results.get('saved_minutes', {}).get('value')
+        population = 'подходящих случаев' if measurement['population'] == 'eligible_cases' else 'обращений'
+        count = scenario['parameters'].get('case_count', {}).get('value')
+        if measurement['primary']['unit'] == 'hours':
+            if hours is not None:
+                return f"{_number(hours)} человеко-часа на {_number(count)} {population}"
+        elif minutes is not None:
+            return f"{_number(minutes)} человеко-минут на " + ('подходящий случай' if measurement['population'] == 'eligible_cases' else 'обращение')
+    elif model == 'elapsed_time':
+        minutes = results.get('saved_elapsed_minutes', {}).get('value')
+        if minutes is not None:
+            return f"{_number(minutes)} минут на измеряемый этап"
+    elif model == 'time_capacity':
+        value = results.get('capacity_equivalent', {}).get('value')
+        if value is not None:
+            return f"{_number(value)} руб./год эквивалента мощности"
+    return None
 
 
 def economic_summary(initiative):
+    """Kept as the UI's single effect-summary function, now covering four metric types."""
     e = initiative['economics']
+    scope = 'На выбранном участке: ' if initiative['measurement'].get('partial_initiative') else ''
     base = next((s for s in e['scenarios'] if s['name'] == 'base'), None)
-    if not base or base['results']['released_hours']['value'] is None:
-        return 'Требуются дополнительные данные'
-    prefix = 'Иллюстрация: ' if base['status'] == 'illustrative' else 'Условная оценка: '
-    return prefix + _number(base['results']['released_hours']['value']) + ' ч/год; ' + _number(
-        base['results']['capacity_equivalent']['value']) + ' руб./год эквивалента мощности'
+    if base:
+        result = _result_summary(initiative, base)
+        if result:
+            assumed = any(p['origin'] == 'illustrative' for p in base['parameters'].values())
+            return scope + ('Сценарная оценка: ' if assumed else 'Условная оценка: ') + result
+    return scope + _metric_name(initiative) + '. Прогноз не задан; требуется измерение на пилоте.'
+
+
+def _scenario_lines(initiative):
+    """Unit-specific outputs with explicit scenario premises, not repeated annual-money tables."""
+    cases = initiative['economics']['scenarios']
+    if not any(_result_summary(initiative, s) is not None for s in cases):
+        return []
+    by_name = {s['name']: s for s in cases}
+    origins = {p['origin'] for s in cases for p in s['parameters'].values() if p['value'] is not None}
+    common_origin = next(iter(origins)) if len(origins) == 1 else None
+    model = initiative['economics']['model']
+    lines = []
+    if common_origin:
+        lines += ['Происхождение чисел: **' + ORIGINS[common_origin] + '**. '
+                  + ('Это не показатели ведомства.' if common_origin == 'illustrative' else ''), '']
+    # Distinct sentences make scenario differences visible even when notes repeat a common introduction.
+    note_sets = {}
+    for s in cases:
+        notes = list(dict.fromkeys(business_text(p['note']) for p in s['parameters'].values() if p['value'] is not None))
+        note_sets[s['name']] = list(dict.fromkeys(sentence for note in notes for sentence in re.split(r'(?<=[.!?])\s+', note)))
+    common = set.intersection(*(set(sentences) for sentences in note_sets.values())) if note_sets else set()
+    if model in ('labor_time', 'elapsed_time'):
+        before, after = ('before_minutes','after_minutes') if model == 'labor_time' else ('before_elapsed_minutes','after_elapsed_minutes')
+        count_values = {s['parameters'].get('case_count', {}).get('value') for s in cases}
+        if model == 'labor_time' and len(count_values) == 1 and None not in count_values:
+            pop = 'подходящих случаев' if initiative['measurement']['population'] == 'eligible_cases' else 'обращений'
+            lines += ['Расчётная база: ' + _number(next(iter(count_values))) + ' ' + pop + '; не годовая нагрузка.', '']
+        unit = 'рабочих минут на случай' if model == 'labor_time' else 'минут на этап'
+        lines += ['| Сценарий | До / после (' + unit + ') | Эффект | Отличающееся допущение |', '| --- | --- | --- | --- |']
+        for name, label in SCENARIO_LABELS.items():
+            s = by_name[name]
+            values=[]
+            for key in (before,after):
+                param=s['parameters'][key]
+                values.append(_number(param['value']) + ('' if common_origin or param['value'] is None else '; ' + ORIGINS[param['origin']]))
+            differing=[x for x in note_sets[name] if x not in common]
+            note=' '.join(differing or note_sets[name])
+            lines += ['| ' + label + ' | ' + _safe(' / '.join(values)) + ' | ' +
+                      _safe(_result_summary(initiative,s) or 'Требуются дополнительные данные') + ' | ' + _brief(note,20) + ' |']
+        if initiative['measurement']['population']=='all_cases':
+            shares=[]
+            for name,label in SCENARIO_LABELS.items():
+                p=by_name[name]['parameters'].get('applicability')
+                shares.append(label + ': ' + (_number(p['value']) + ' (' + ORIGINS[p['origin']] + ')' if p else 'неизвестно'))
+            lines += ['', 'Доля подходящих случаев: ' + '; '.join(shares) + '.', '']
+        if model == 'labor_time':
+            factor = 'число подходящих случаев' if initiative['measurement']['population'] == 'eligible_cases' else 'обращения × применимость'
+            lines += ['', 'Человеко-часы = ' + factor + ' × (минуты до − после) / 60. Проверка и исправления включены.', '']
+        else:
+            lines += ['', 'Сокращение длительности этапа = минуты до − после; на всю услугу оценка не распространяется.', '']
+    else:
+        keys=list(dict.fromkeys(k for s in cases for k,p in s['parameters'].items() if p['value'] is not None))
+        lines += ['| Предпосылка и единица | Консервативный | Базовый | Оптимистичный |', '| --- | --- | --- | --- |']
+        for key in keys:
+            values=[];unit=''
+            for name in SCENARIO_LABELS:
+                p=by_name[name]['parameters'].get(key)
+                if p is None: values.append('неизвестно');continue
+                unit=UNIT_LABELS.get(p['unit'],p['unit'])
+                values.append(_safe(_number(p['value']) + ('' if common_origin or p['value'] is None else '; '+ORIGINS[p['origin']])))
+            lines += ['| '+_safe(PARAMETERS[key]+' ('+unit+')')+' | '+' | '.join(values)+' |']
+        for name,label in SCENARIO_LABELS.items():
+            notes=[x for x in note_sets[name] if x not in common]
+            lines += [label+': '+_brief(' '.join(notes or note_sets[name]),24)]
+        columns={'capacity_equivalent':'Эквивалент мощности','annual_opex':'Эксплуатация за год',
+                 'first_year_net_capacity_equivalent':'Первый год после внедрения'}
+        lines += ['', '| Сценарий | '+' | '.join(columns.values())+' |', '| --- | --- | --- | --- |']
+        for name,label in SCENARIO_LABELS.items():
+            results=by_name[name]['results']
+            lines += ['| '+label+' | '+' | '.join(_number(results.get(k,{}).get('value'))+' руб.' for k in columns)+' |']
+        lines += ['', 'Часы = годовые обращения × применимость × использование × (минуты до − после) / 60 × достижение эффекта; '
+                  'эквивалент = часы × стоимость часа. Эксплуатация = постоянные расходы + обработанные случаи × расходы на случай; '
+                  'первый год = эквивалент − эксплуатация − внедрение.', '']
+    if any(v['value'] is not None and Decimal(v['value']) < 0 for s in cases for v in s['results'].values()):
+        lines += ['Отрицательное значение означает увеличение затрат или длительности.', '']
+    return lines
 
 
 def render_markdown(artifact):
     r = artifact['report']; initiatives = r['initiatives']; d = r['document']
-    assumption_sets = {}
-    for a in initiatives:
-        cases = a['economics']['scenarios']
-        if any(p['value'] is not None for case in cases for p in case['parameters'].values()):
-            parameters = {s['name']: s['parameters'] for s in cases}
-            assumption_sets.setdefault(digest(parameters), {'label': f'Набор {len(assumption_sets)+1}', 'parameters': parameters})
     document = ' '.join(str(d.get(k) or '') for k in ('act_type', 'number', 'adoption_date')).strip()
-    lines = ['# AI-возможности и экономика', '', '## Резюме для руководителя', '',
-        _safe(document or 'Нормативный акт'), '',
-        'Предварительный отчёт. Это предложения для обсуждения и пилота, а не инвестиционное заключение.', '',
-        f"Инициатив: {len(initiatives)}. Отклонённых сценариев: {len(r['rejected'])}. "
-        + f"Карта процессов: {"требует проверки" if r['normalization_status'] != "completed" else "обработана; содержательная проверка необходима"}.", '']
-    if d.get('revision_date'): lines += ['Редакция: ' + _safe(d['revision_date']), '']
-    for warning in r['warnings']: lines += ['- ' + _safe(warning)]
-    lines += ['', 'Наиболее перспективные направления по текущим предпосылкам:', '']
-    for a in initiatives[:3]:
-        lines += [f"- **{_safe(a['title'])}** — {_safe(a['expected_effect'])} {_safe(a['priority']['label'])}."]
-    if not initiatives: lines += [_safe(r['explanation'])]
-    lines += ['', '## Рейтинг инициатив', '',
-              '| Место | Инициатива и процесс | Решение | Механизм эффекта | Индивидуальная оценка | Приоритет | Главное ограничение |',
-              '| --- | --- | --- | --- | --- | --- | --- |']
+    lines = ['# AI-возможности и ожидаемый эффект', '', '## Резюме для руководителя', '',
+             _safe(document or 'Нормативный акт') + ('. Редакция: ' + _safe(d['revision_date']) if d.get('revision_date') else ''), '']
+    processes = list(dict.fromkeys(business_text(g['process_title']) for a in initiatives for g in a['grounding']))
+    if processes:
+        lines += ['Рассмотрены процессы: ' + _brief('; '.join(processes), 16) + '.', '']
+    lines += ['Перспективность означает обоснованность дальнейшей проработки, а не окупаемость или готовность к внедрению. '
+              'Источники сверены с НПА; эффект проверяется пилотом.', '']
+    if not initiatives:
+        lines += [_business(r['explanation']), '']
+    lines += ['## Сравнение AI-инициатив', '',
+              '| Инициатива | Что улучшает | Перспективность | Ожидаемый эффект | Что нужно проверить |',
+              '| --- | --- | --- | --- | --- |']
     for a in initiatives:
-        processes = '; '.join(dict.fromkeys(g['process_title'] for g in a['grounding']))
-        lines += [f"| {a['rank']} | {_safe(a['title'])}; {_safe(processes)} | {_safe(a['ai_role'])} | "
-                  f"{_safe(a['effect_mechanism'])} | {_safe(economic_summary(a))} | {a['priority']['score']}/100; {_safe(a['priority']['label'])} | {_safe(a['uncertainties'][0])} |"]
-    lines += ['', '**Совокупная экономия не рассчитана:** независимость эффектов не подтверждена. '
-              'Высвобождение часов и его стоимостный эквивалент не являются гарантированной экономией бюджета.', '']
-    if r['portfolio']['conflicts']:
-        lines += ['Пересечения, требующие проверки:', '']
-        by_id = {a['id']: a['title'] for a in initiatives}
-        for c in r['portfolio']['conflicts']:
-            lines += ['- ' + ' / '.join(_safe(by_id[k]) for k in c['initiative_ids']) + ': ' + _safe(c['reason'])]
-    lines += ['', '## Краткие business cases', '']
+        p = a['prospect']; m = a['measurement']
+        base = next((s for s in a['economics']['scenarios'] if s['name'] == 'base'), None)
+        effect = _result_summary(a, base) if base else None
+        effect = ('Сценарно: ' + effect) if effect and any(v['origin'] == 'illustrative' for v in base['parameters'].values()) else effect
+        if not effect:
+            effect = _metric_name(a) + ' — измерить'
+        if m.get('partial_initiative'):
+            effect = 'Выбранный участок: ' + effect
+        lines += ['| ' + ' | '.join((_business(a['title']), _business(_first_sentence(a['ai_role'])), _safe(p['label']),
+                    _business(effect), _business(p['main_uncertainty']))) + ' |']
+    high = [a for a in initiatives if a['prospect']['category'] == 'high']
+    lines += ['', '## Перспективные направления для первых пилотов', '']
+    if high:
+        lines += ['Сначала проверить инициативы высокой перспективности: их ограниченные пилоты и критерии описаны ниже.', '']
+    else:
+        lines += ['До пилотов устранить обозначенные неопределённости. Низкая перспективность и недостаток оснований — разные выводы.', '']
+    lines += ['## Ожидаемый эффект и предпосылки оценки', '']
     for a in initiatives:
-        lines += [f"### {a['rank']}. {_safe(a['title'])}", '',
-                  '**Проблема — гипотеза:** ' + _safe(a['problem']), '',
-                  '**Модель:** ' + _safe(a['ai_role']), '', '**Человек:** ' + _safe(a['human_role']), '',
-                  'Утверждение юридически значимых результатов остаётся уполномоченному человеку.', '',
-                  '**Почему ИИ:** ' + _safe(a['why_ai']), '',
-                  '**Обычная автоматизация:** ' + _safe(a['non_ai_alternative']), '',
-                  '**Механизм эффекта:** ' + _safe(a['effect_mechanism']), '',
-                  '**Ожидаемый эффект — гипотеза:** ' + _safe(a['expected_effect']), '',
-                  '**Данные и внедрение:** ' + '; '.join(_safe(x) for x in a['conditions']), '',
-                  '**Ограничения и риски:** ' + '; '.join(_safe(x) for x in a['risks'] + a['uncertainties']), '',
-                  '**Основание рейтинга:** ' + _safe(a['priority']['reason']), '',
-                  'Вклад критериев в балл: ' + ', '.join(f'{k}={v:g}' for k, v in a['priority']['weighted_contributions'].items()) + '.', '']
-        if a['incremental_value']: lines += ['**Добавочная ценность:** ' + _safe(a['incremental_value']), '']
-        e = a['economics']
-        for reason in e['reasons']: lines += [_safe(reason), '']
-        if any(v['value'] is not None for case in e['scenarios'] for v in case['results'].values()):
-            lines += ['| Сценарий | Часы/год | Эквивалент мощности, руб./год | OPEX, руб./год | Эквивалент за вычетом OPEX | Первый год за вычетом внедрения |',
-                      '| --- | --- | --- | --- | --- | --- |']
-            for s in e['scenarios']:
-                v = s['results']; label = {'illustrative': ' — иллюстрация', 'conditional_estimate': ' — условная оценка',
-                                         'needs_data': ' — неполные данные'}[s['status']]
-                lines += ['| ' + SCENARIO_LABELS[s['name']] + label + ' | ' + ' | '.join(_number(v[k]['value']) for k in (
-                    'released_hours', 'capacity_equivalent', 'annual_opex', 'annual_net_capacity_equivalent', 'first_year_net_capacity_equivalent')) + ' |']
-        if any(p['value'] is not None for case in e['scenarios'] for p in case['parameters'].values()):
-            set_key = digest({s['name']: s['parameters'] for s in e['scenarios']})
-            lines += ['', assumption_sets[set_key]['label'] + ' предпосылок приведён в методике ниже.', '']
-        if e['status'] == 'needs_data':
-            lines += ['Количественная часть рейтинга не оценена. Нулевой вклад в балл не означает нулевую экономию.', '']
-        if e['required_parameters']:
-            lines += ['Для инвестиционного решения нужны: ' + ', '.join(PARAMETERS[k] for k in e['required_parameters']) + '.', '']
-    lines += ['## Экономическая методика и приоритизация', '',
-        'Экономика рассчитывается Python с десятичной арифметикой. Неизвестное значение — null, не ноль. '
-        'Отрицательный эффект сохраняется. Единицы: часы/год и рубли; доли — от 0 до 1.', '']
-    for key, formula in FORMULAS.items(): lines += [f'- `{key} = {formula}`']
-    lines += ['', 'Рабочие минуты относятся к одному случаю в границах инициативы, '
-              'суммарно по её операциям. На количество исходных ID они не умножаются.', '']
-    for group in assumption_sets.values():
-        lines += ['### ' + group['label'] + ' предпосылок', '',
-                  'Одинаковые иллюстративные предпосылки не делают эффекты независимыми.', '',
-                  '| Параметр и единица | Консервативный | Базовый | Оптимистичный |', '| --- | --- | --- | --- |']
-        for key, unit in UNITS.items():
-            values = []
-            for name in ('conservative', 'base', 'optimistic'):
-                p = group['parameters'][name][key]
-                values.append(_safe((p['value'] if p['value'] is not None else 'неизвестно') + ' — ' + ORIGINS[p['origin']]))
-            lines += ['| ' + PARAMETERS[key] + ' (' + unit + ') | ' + ' | '.join(values) + ' |']
-        lines += ['']
-    lines += ['', 'Время после внедрения должно включать человеческую проверку. Нормативный срок услуги не заменяет рабочие минуты.', '',
-        'Баллы: сумма вес × оценка / 5. Веса: экономика 25, реализуемость 20, данные 15, '
-        'срок пилота 10, риски 20, надёжность предпосылок 10. Неизвестное даёт 0 без '
-        'перераспределения веса. Иллюстративные числа не дают экономических баллов. '
-        'Операционные оценки модели — предварительные гипотезы; точные шкалы сохранены в документации и коде.', '',
-        '## Доказательная база', '',
-        'Цитаты подтверждают операции и их расположение. Они не подтверждают экономический эффект или готовность ИТ.', '']
+        p = a['prospect']; m = a['measurement']; e = a['economics']
+        lines += ['### ' + _business(a['title']), '',
+                  '**Основание:** ' + _business(p['reason']) + ' **Пилот:** ' + _business(m['method']) +
+                  ' **Критерий:** ' + _business(m['success_criterion']), '']
+        # Technical uncertainty is not copied as business prose; each scope retains its explicit boundary.
+        if m.get('partial_initiative'):
+            lines += ['Оценивается только выбранный участок: ' + _business(m['work']) +
+                      ' Другие операции не включены. ' + _business(m['boundary']) +
+                      ' Случай: ' + _business(m['case_unit']), '']
+        numeric = _scenario_lines(a)
+        if numeric:
+            if not m.get('partial_initiative'):
+                lines += ['Граница: ' + _business(m['boundary']) + ' Случай: ' + _business(m['case_unit']), '']
+            lines += numeric
+        elif e['required_parameters']:
+            lines += ['Для расчёта нужны: ' + ', '.join(_safe(PARAMETERS[k]) for k in e['required_parameters']) + '.', '']
+        lines += ['Изменит оценку: ' + _business(p['change_condition']), '']
+        if m.get('secondary'):
+            metric = m['secondary']
+            lines += ['Дополнительно измерить: ' + _business(metric['name']) +
+                      ' (' + _safe(UNIT_LABELS.get(metric['unit'], metric['unit'])) + ').', '']
+    lines += ['## Ограничения', '',
+              '- До пилота подтвердить доступ к данным, обезличивание и защищённый контур работы с документами.',
+              '- Сценарии — допущения, не показатели ведомства. Рабочее время с проверкой и исправлениями отличается от ожидания и срока услуги.',
+              '- Пересекающиеся эффекты не суммируются без независимых замеров. Часы, деньги, длительность и качество не складываются.',
+              '- Эквивалент мощности — не бюджетная экономия. Неизвестные затраты — не ноль. Решения и утверждение документов остаются уполномоченному человеку.']
+    if r['normalization_status'] != 'completed':
+        lines += ['- Для части операций нужно уточнить границы и участников до количественных выводов.']
+    lines += ['', 'Полные описания и условия — в JSON; сокращения отмечены многоточием.', '']
+    if r['rejected']:
+        lines += ['## Отклонённые сценарии', '']
+        lines += ['- **' + _brief(x['title'], 8) + ':** ' + _brief(_first_sentence(x['reason']), 10) for x in r['rejected']]
+    lines += ['', '## Приложение с источниками', '',
+              'Цитаты подтверждают операции, а не прогноз эффекта. Полные цитаты, координаты и расчётные параметры — в opportunities.json.', '']
     for a in initiatives:
-        lines += ['**' + _safe(a['title']) + '**', '',
-                  'Действия карты: ' + ', '.join(_safe(x) for x in a['action_ids']) + '.',
-                  'Исходные кандидаты: ' + ', '.join(_safe(x) for x in a['source_action_ids']) + '.', '']
-        # A short report uses one primary proof per initiative; the full chain remains in JSON.
+        lines += ['**' + _business(a['title']) + '**', '']
         eid = a['grounding'][0]['source_candidates'][0]['evidence_refs'][0]
         proof = r['evidence'][eid]
         lines += ['Пункт ' + _safe(proof['clause_number'] or 'не определён') +
                   (f"; страница PDF {proof['page_number']}" if proof['page_number'] else '') + ':', '']
-        fence = '`' * max(3, 1 + max((len(x) for x in re.findall(r'`+', proof['quote'])), default=0))
-        lines += [fence + 'text', proof['quote'], fence, '',
-                  'Остальные точные цитаты, координаты и связи сохранены в opportunities.json.', '']
-    if r['rejected']:
-        lines += ['## Отклонённые сценарии', '']
-        lines += ['- ' + _safe(x['title']) + ': ' + _safe(x['reason']) for x in r['rejected']]
-    lines += ['', '## Что проверить перед инвестиционным решением', '',
-        '- Качество и законность доступа к данным, действующие системы и интеграции.',
-        '- Реальный объём, рабочие минуты до/после с проверкой человеком, долю использования, качество и стоимость эксплуатации.',
-        '- Независимость эффектов и отсутствие повторного учёта; бюджетное сокращение требует отдельных доказанных предпосылок.',
-        '- Спорные связи исходной карты и пропуски первого этапа. Этот отчёт не заменяет проверку НПА.', '',
-        'Метрики этапа: ' + str(artifact['metrics']['requests']) + ' запросов; ' +
-        f"{artifact['metrics']['elapsed_seconds']:.2f} с. Токены: " + _safe(artifact['metrics']['usage'] or 'неизвестны') + '.', '']
+        quote = proof['quote']
+        if len(quote) > 300:
+            quote = quote[:299].rstrip() + '…'
+        fence = '`' * max(3, 1 + max((len(x) for x in re.findall(r'`+', quote)), default=0))
+        lines += [fence + 'text', quote, fence, '']
     return '\n'.join(lines)
