@@ -14,6 +14,7 @@ from govai.normalization import (
     markdown_report, normalize_analysis, prepare_request, restore_normalized,
 )
 from govai.processes import ProcessError
+from govai.opportunity_ui import render_opportunity_testing
 
 
 def _source_notices(rejected_count):
@@ -167,6 +168,7 @@ def render_workspace(analysis, origin, *, technical=False):
             render_map(artifact)
         else:
             _source_notices(len(analysis.raw['rejected_candidates']))
+            render_opportunity_testing(artifact, analysis)
             st.write('Нормализация: ' + ('восстановлена из JSON' if origins.get(key) == 'imported' else 'выполнена в сессии'))
             st.json(artifact['metrics'])
             st.caption('Метрики относятся к сохранённому запуску нормализации. Время и токены старого извлечения неизвестны, '
