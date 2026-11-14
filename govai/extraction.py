@@ -113,6 +113,8 @@ def extract_document(filename: str, data: bytes, *, encoding: str = "utf-8-sig")
 
     parts, headings, warnings = _read_parts(filename, data, encoding)
     extension = Path(filename).suffix.lower().lstrip(".")
-    return structure_document(
+    result = structure_document(
         filename, sha256(data).hexdigest(), extension, parts, headings, warnings
     )
+    result['source']['type'] = 'file'
+    return result

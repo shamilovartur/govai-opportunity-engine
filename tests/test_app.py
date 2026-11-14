@@ -6,6 +6,8 @@ from streamlit.proto.Common_pb2 import FileURLs
 from streamlit.runtime.uploaded_file_manager import UploadedFile, UploadedFileRec
 from streamlit.testing.v1 import AppTest
 
+from govai.url_input import URLInputError, _html_document
+
 APP = Path(__file__).resolve().parents[1] / "app.py"
 
 
@@ -80,3 +82,53 @@ def test_unrecognized_structure_preserves_text_in_ui():
     assert not app.exception
     assert 'Нумерованные пункты не распознаны' in app.info[0].value
     assert app.text_area[0].value == 'Обычный текст без нумерации.'
+
+
+def url_result():
+    html = (APP.parent / 'tests/fixtures/npa-page.html').read_bytes()
+    doc = _html_document(html, 'https://public.example.org/doc', 'text/html')
+    doc['source'].update(type='url_html', original_url='https://public.example.org/doc',
+                         final_url='https://public.example.org/doc',
+                         retrieved_at='2026-11-14T00:00:00+00:00')
+    return doc
+
+
+def test_url_mode_loads_html_and_does_not_refetch_on_rerun():
+    app = AppTest.from_file(str(APP)).run(timeout=15)
+    app.radio[0].set_value('Загрузить по ссылке').run()
+    app.text_input[0].set_value('https://public.example.org/doc').run()
+    with patch('govai.url_input.extract_url_document', return_value=url_result()) as fetch:
+        app.button[0].click().run()
+        assert not app.exception
+        assert 'Заявитель направляет заявление' in app.text_area[0].value
+        assert 'Полнота НПА автоматически не подтверждена' in app.warning[0].value
+        assert len(app.get('download_button')) == 1
+        app.run()
+        fetch.assert_called_once_with('https://public.example.org/doc')
+
+
+def test_url_change_and_failed_retry_clear_old_document():
+    app = AppTest.from_file(str(APP)).run(timeout=15)
+    app.radio[0].set_value('Загрузить по ссылке').run()
+    app.text_input[0].set_value('https://public.example.org/doc').run()
+    with patch('govai.url_input.extract_url_document', return_value=url_result()):
+        app.button[0].click().run()
+    assert app.text_area
+    app.text_input[0].set_value('https://public.example.org/other').run()
+    assert not app.text_area
+    with patch('govai.url_input.extract_url_document', side_effect=URLInputError('HTTP 403: доступ запрещён')):
+        app.button[0].click().run()
+    assert not app.exception
+    assert '403' in app.error[0].value
+    assert not app.text_area
+    assert not app.get('download_button')
+
+
+def test_url_mode_blocks_local_address_without_network():
+    app = AppTest.from_file(str(APP)).run(timeout=15)
+    app.radio[0].set_value('Загрузить по ссылке').run()
+    app.text_input[0].set_value('https://127.0.0.1/private').run()
+    app.button[0].click().run()
+    assert not app.exception
+    assert 'Локальные и внутренние адреса запрещены' in app.error[0].value
+    assert not app.text_area

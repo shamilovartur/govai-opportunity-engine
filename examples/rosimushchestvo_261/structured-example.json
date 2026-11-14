@@ -6,7 +6,8 @@
     "sha256": "8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4",
     "text_sha256": "8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4",
     "format": "txt",
-    "page_number_basis": null
+    "page_number_basis": null,
+    "type": "file"
   },
   "metadata": {
     "act_type": {
