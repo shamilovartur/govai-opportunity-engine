@@ -12,6 +12,7 @@ from govai.extraction import (
     extract_document,
 )
 from govai.url_input import extract_url_document
+from govai.process_ui import render_processes
 
 
 def _load_input():
@@ -63,6 +64,8 @@ def main() -> None:
 
     document = _load_input()
     if document is None:
+        st.session_state.pop('process_result', None)
+        st.session_state.pop('process_document', None)
         return
 
     text = document["text"]
@@ -111,6 +114,7 @@ def main() -> None:
         file_name=f"{Path(document['source']['filename']).stem}.structure.json",
         mime="application/json",
     )
+    render_processes(document)
 
 
 if __name__ == "__main__":
