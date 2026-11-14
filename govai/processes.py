@@ -13,6 +13,8 @@ from typing import Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+PROMPT_VERSION = '1.0'
+
 
 class ProcessError(Exception):
     """Safe, user-facing analysis failure (never includes raw provider responses)."""
@@ -56,6 +58,8 @@ class Candidates(StrictModel):
 class ProcessProvider(Protocol):
     name: str
     model: str
+    prompt_version: str
+    prompt_sha256: str
 
     def extract(self, payload: dict) -> Candidates: ...
 
@@ -369,7 +373,8 @@ def extract_processes(document: dict, provider: ProcessProvider, *,
     else:
         explanation = "LLM не обнаружила конкретных административных действий во всех обработанных блоках."
     return {"schema_version": "1.0", "status": "completed_with_rejections" if rejected else "completed",
-            "provider": provider.name, "model": provider.model, "prompt_version": "1.0",
+            "provider": provider.name, "model": provider.model,
+            "prompt_version": getattr(provider, 'prompt_version', PROMPT_VERSION),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source": dict(document['source']), "metadata": document['metadata'],
             "text_sha256": sha256(document['text'].encode()).hexdigest(),
