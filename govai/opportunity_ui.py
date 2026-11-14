@@ -1,4 +1,4 @@
-"""Small technical entry point; no financial calculations or automatic paid calls."""
+"""Report generation and display; imports and diagnostics stay in the technical section."""
 
 import json
 import os
@@ -10,75 +10,100 @@ from govai.analysis_io import digest
 from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids)
-from govai.opportunity_report import economic_summary, render_markdown
+from govai.opportunity_report import economic_summary, render_markdown, _safe as escape_text
 from govai.processes import ProcessError
 
 
-def render_opportunity_testing(normalized, analysis):
-    st.subheader('AI-инициативы и экономика — тестирование')
-    st.caption('Используется сохранённая карта. Извлечение НПА и нормализация не повторяются.')
+def opportunity_state(normalized):
     model = os.environ.get('OPENAI_MODEL', '').strip() or normalized['compatibility']['model']
-    provider_name = OpenAIOpportunityProvider.name
-    key = digest(compatibility(normalized, model, provider_name))
-    cache = st.session_state.setdefault('opportunity_reports', {})
-    with st.expander('Восстановить готовый отчёт без API'):
-        uploaded = st.file_uploader('Готовый opportunities.json', type=['json'], max_upload_size=64,
-                                   key='opportunities-upload')
-        if st.button('Восстановить отчёт', disabled=uploaded is None):
+    provider = OpenAIOpportunityProvider.name
+    key = digest(compatibility(normalized, model, provider))
+    return key, model, provider, st.session_state.setdefault('opportunity_reports', {})
+
+
+def render_opportunities(normalized, analysis):
+    key, model, provider_name, reports = opportunity_state(normalized)
+    plans = st.session_state.setdefault('opportunity_plans', {})
+    failures = st.session_state.setdefault('opportunity_failures', {})
+    pending = plans.get(key)
+    artifact = reports.get(key)
+    if not artifact:
+        if key in failures:
+            st.error('Отчёт не сформирован: ' + failures[key]['message'])
+            st.info('План сохранён в этой сессии. Повторите сборку без нового запроса к модели.' if pending else
+                    'Процессы сохранены. Устраните указанную причину и повторите формирование отчёта.')
+        label = 'Повторить сборку без API' if pending else 'Сформировать отчёт'
+        if st.button(label, type='primary'):
+            provider = None; started = time.perf_counter()
             try:
-                cache[key] = restore_opportunities(uploaded.getvalue(), normalized, analysis, model, provider_name)
-                st.session_state.setdefault('opportunity_origins', {})[key] = 'imported'
-                st.rerun()
+                if pending is None and operational_action_ids(normalized['map']):
+                    try: secrets = st.secrets.to_dict()
+                    except FileNotFoundError: secrets = {}
+                    secret, configured_model = configuration(secrets)
+                    provider = OpenAIOpportunityProvider(secret, configured_model)
+                with st.spinner('Отчёт формируется…' if pending is None else 'Отчёт собирается без API…'):
+                    result = generate_opportunities(normalized, analysis, provider, model=model,
+                        provider_name=provider_name, saved_plan=pending,
+                        on_plan=lambda plan: plans.update({key: plan}))
+                reports[key] = result
+                plans.pop(key, None); failures.pop(key, None)
+                st.session_state.setdefault('opportunity_origins', {})[key] = 'generated'
             except ProcessError as exc:
-                st.error('Восстановление отчёта: ' + str(exc))
-    if key not in cache and st.button('Сформировать отчёт', type='primary'):
-        provider = None; started = time.perf_counter()
-        try:
-            if operational_action_ids(normalized['map']):
-                try:
-                    secrets = st.secrets.to_dict()
-                except FileNotFoundError:
-                    secrets = {}
-                secret, configured_model = configuration(secrets)
-                provider = OpenAIOpportunityProvider(secret, configured_model)
-            with st.spinner('Формируем AI-инициативы, проверяем источники и рассчитываем сценарии…'):
-                artifact = generate_opportunities(normalized, analysis, provider, model=model)
-            cache[key] = artifact
-            st.session_state.setdefault('opportunity_origins', {})[key] = 'generated'
+                metrics = exc.metrics if isinstance(exc, OpportunityError) else {
+                    'requests': 0, 'elapsed_seconds': time.perf_counter()-started, 'usage': None}
+                failures[key] = {**metrics, 'message': str(exc)}
+            finally:
+                if provider: provider.close()
             st.rerun()
-        except ProcessError as exc:
-            st.error('Этап AI-возможностей: ' + str(exc) + ' Исходная карта сохранена; повторный анализ НПА не требуется.')
-            metrics = exc.metrics if isinstance(exc, OpportunityError) else {
-                'requests': 0, 'elapsed_seconds': time.perf_counter()-started, 'usage': None}
-            st.session_state.setdefault('opportunity_failures', {})[key] = metrics
-        finally:
-            if provider: provider.close()
-    artifact = cache.get(key)
+        return
+    st.success('Отчёт готов.')
+    st.download_button('Скачать отчёт', lambda: render_markdown(artifact), type='primary',
+                       file_name='opportunity-report.md', mime='text/markdown', on_click='ignore', width='stretch')
+    report = artifact['report']
+    st.warning('Предварительные гипотезы требуют проверки. Без индивидуальных данных денежный эффект не оценён.'
+               + (' Часть группировки процессов не подтверждена; это ограничивает числовые оценки.'
+                  if report['normalization_status'] != 'completed' else ''))
+    st.caption(f"Инициатив: {len(report['initiatives'])}. Совокупный эффект не суммируется без подтверждения независимости.")
+    for a in report['initiatives']:
+        with st.container(border=True):
+            st.markdown(f"**{a['rank']}. {escape_text(a['title'])}**")
+            st.write(escape_text(a['ai_role']))
+            st.caption('Эффект: ' + a['effect_mechanism'])
+            st.caption(economic_summary(a))
+            st.caption(a['priority']['label'])
+            st.caption('Ограничение: ' + a['uncertainties'][0])
+    if not report['initiatives']: st.info(report['explanation'])
+
+
+def render_opportunity_technical(normalized, analysis):
+    key, model, provider_name, reports = opportunity_state(normalized)
+    st.subheader('Отчёт: восстановление и диагностика')
+    uploaded = st.file_uploader('Готовый opportunities.json', type=['json'], max_upload_size=64,
+                               key='opportunities-upload')
+    if st.button('Восстановить отчёт', disabled=uploaded is None):
+        try:
+            reports[key] = restore_opportunities(uploaded.getvalue(), normalized, analysis, model, provider_name)
+            st.session_state.setdefault('opportunity_origins', {})[key] = 'imported'
+            st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
+            st.session_state.setdefault('opportunity_plans', {}).pop(key, None)
+            st.rerun()
+        except ProcessError as exc: st.error('Восстановление отчёта: ' + str(exc))
+    artifact = reports.get(key)
     if artifact:
-        report = artifact['report']
         st.caption('Отчёт восстановлен без API.' if st.session_state.get('opportunity_origins', {}).get(key) == 'imported'
                    else 'Отчёт сформирован в текущей сессии.')
-        st.warning('Предварительные гипотезы. Без индивидуальных параметров числовой эффект не оценён; сценарные допущения не являются показателями ведомства или экономией бюджета.')
-        if report['normalization_status'] != 'completed':
-            st.warning('Входная карта неполная или спорная. Подтверждённые операции учтены в поиске; замечания ограничивают числовую оценку.')
-        st.write(f"Инициатив: {len(report['initiatives'])}; отклонённых сценариев: {len(report['rejected'])}.")
-        if report['initiatives']:
-            st.dataframe([{'Место': a['rank'], 'Инициатива': a['title'], 'Решение': a['ai_role'], 'Механизм эффекта': a['effect_mechanism'],
-                           'Главное ограничение': a['uncertainties'][0], 'Приоритет': a['priority']['label'],
-                           'Балл': a['priority']['score'], 'Экономика': economic_summary(a)}
-                          for a in report['initiatives']], hide_index=True)
-            for a in report['initiatives'][:3]:
-                st.text(a['title'] + ': ' + a['ai_role'])
-        else:
-            st.info(report['explanation'])
-        st.caption('Совокупный эффект не суммируется без подтверждения независимости. Подробности и основания — в отчёте.')
-        st.caption(f"Сохранённый запуск: запросов {artifact['metrics']['requests']} · Время: {artifact['metrics']['elapsed_seconds']:.1f} с · "
-                   f"Токены: {artifact['metrics']['usage'] or 'неизвестны'}")
+        st.json(artifact['metrics'])
+        st.caption('Метрики относятся к сохранённому запуску; локальная пересборка не создаёт API-запросов.')
         st.download_button('Скачать opportunities.json', lambda: json.dumps(artifact, ensure_ascii=False, indent=2),
                            file_name='opportunities.json', mime='application/json', on_click='ignore')
-        st.download_button('Скачать opportunity-report.md', lambda: render_markdown(artifact),
-                           file_name='opportunity-report.md', mime='text/markdown', on_click='ignore')
+    pending = st.session_state.get('opportunity_plans', {}).get(key)
+    if pending:
+        st.info('Структурированный план сохранён в памяти сессии, но отчёт ещё не готов. После потери сессии план недоступен.')
+        st.json(pending['metrics'])
+        if st.button('Удалить план для нового запроса', help='Только удаление. Новый платный запрос возможен после нажатия «Сформировать отчёт».'):
+            st.session_state.opportunity_plans.pop(key, None)
+            st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
+            st.rerun()
     if key in st.session_state.get('opportunity_failures', {}):
-        metrics = st.session_state.opportunity_failures[key]
-        st.caption(f"Последняя ошибка: запросов {metrics['requests']}, время {metrics['elapsed_seconds']:.1f} с; "
-                   f"токены {metrics['usage'] or 'неизвестны'}.")
+        st.caption('Последняя ошибка формирования отчёта')
+        st.json(st.session_state.opportunity_failures[key])

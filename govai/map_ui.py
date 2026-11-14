@@ -14,7 +14,6 @@ from govai.normalization import (
     markdown_report, normalize_analysis, prepare_request, restore_normalized,
 )
 from govai.processes import ProcessError
-from govai.opportunity_ui import render_opportunity_testing
 
 
 def _source_notices(rejected_count):
@@ -99,94 +98,90 @@ def render_map(artifact):
             st.text(e['quote'])
 
 
-def render_workspace(analysis, origin, *, technical=False):
-    st.subheader('Карта процессов')
-    st.caption('Исходный анализ: ' + ('импортирован из processes.json; извлечение здесь не запускалось.'
-                                    if origin == 'imported' else 'получен в текущей сессии.'))
-    st.write(f"Исходные данные: {len(analysis.raw['procedures'])} групп · {len(analysis.actions)} кандидатов.")
+def map_state(analysis):
     model = os.environ.get('OPENAI_MODEL', '').strip() or analysis.raw['model']
-    provider_name = analysis.raw['provider']
-    key = digest(compatibility(analysis, model, provider_name))
-    maps = st.session_state.setdefault('normalized_maps', {})
+    provider = analysis.raw['provider']
+    key = digest(compatibility(analysis, model, provider))
+    return key, model, provider, st.session_state.setdefault('normalized_maps', {})
+
+
+def normalize_processes(analysis):
+    """The existing second stage, called only by an explicit analysis/retry action."""
+    key, model, _, maps = map_state(analysis)
+    provider = None; started = time.perf_counter()
+    try:
+        prepare_request(analysis)
+        if analysis.actions:
+            try: secrets = st.secrets.to_dict()
+            except FileNotFoundError: secrets = {}
+            secret, configured_model = configuration(secrets)
+            provider = OpenAINormalizer(secret, configured_model)
+        artifact = normalize_analysis(analysis, provider, model=model)
+        maps[key] = artifact
+        st.session_state.setdefault('normalized_origins', {})[key] = 'generated'
+        st.session_state.setdefault('normalization_failures', {}).pop(key, None)
+        return artifact
+    except ProcessError as exc:
+        metrics = exc.metrics if isinstance(exc, NormalizationError) else {
+            'requests': 0, 'elapsed_seconds': time.perf_counter()-started, 'usage': None}
+        st.session_state.setdefault('normalization_failures', {})[key] = metrics
+        raise
+    finally:
+        if provider: provider.close()
+
+
+def render_workspace(analysis, origin, *, technical=False):
+    key, model, provider_name, maps = map_state(analysis)
     origins = st.session_state.setdefault('normalized_origins', {})
-    if technical or key not in maps:
-        with st.expander('Восстановить готовую карту без API'):
-            uploaded = st.file_uploader('Нормализованный normalized_processes.json', type=['json'],
-                                       max_upload_size=64, key='normalized_upload')
-            if st.button('Восстановить карту', disabled=uploaded is None):
-                try:
-                    maps[key] = restore_normalized(uploaded.getvalue(), analysis, model, provider_name)
-                    origins[key] = 'imported'
-                    st.rerun()
-                except ProcessError as exc:
-                    st.error('Восстановление карты: ' + str(exc))
-    run_normalization = False
-    if key not in maps:
-        within_budget = True
+    artifact = maps.get(key)
+    if not technical:
+        if artifact:
+            st.success('Процессы готовы.')
+            m = artifact['map']
+            visible = [p for p in m['processes'] if p['id'] != '__review__']
+            st.caption(f'Обнаружено процессов: {len(visible)}')
+            for p in visible[:8]: st.text('• ' + p['title'])
+            if len(visible) > 8:
+                with st.expander(f'Все процессы ({len(visible)})'):
+                    for p in visible[8:]: st.text('• ' + p['title'])
+            if m['status'] != 'completed':
+                st.warning('Часть группировки требует проверки. Ограничения будут учтены в отчёте.')
+            if not visible: st.info('Конкретные процессы не определены. Отчёт объяснит ограничения анализа.')
+        return artifact
+
+    st.subheader('Сохранённые процессы и карта')
+    st.caption('Исходный анализ: ' + ('импортирован; извлечение не запускалось.' if origin == 'imported' else 'получен в сессии.'))
+    st.write(f"Исходные данные: {len(analysis.raw['procedures'])} групп · {len(analysis.actions)} кандидатов.")
+    uploaded = st.file_uploader('Нормализованный normalized_processes.json', type=['json'],
+                               max_upload_size=64, key='normalized_upload')
+    if st.button('Восстановить карту', disabled=uploaded is None):
         try:
-            _, budget = prepare_request(analysis)
-            st.caption(f"Второй этап: один общий запрос, вход до {budget['input_bytes']:,} байт. "
-                       'Первоначальное извлечение повторяться не будет.')
-        except ProcessError as exc:
-            st.error(str(exc))
-            within_budget = False
-        run_normalization = st.button('Построить карту процессов', type='primary', disabled=not within_budget)
-    elif technical or maps[key]['map']['status'] == 'incomplete':
-        run_normalization = st.button('Повторить только нормализацию', help='Один новый платный запрос второго этапа. Извлечение НПА не повторяется.')
-    if run_normalization:
-        provider = None
-        attempt_started = time.perf_counter()
-        try:
-            if analysis.actions:
-                try:
-                    secrets = st.secrets.to_dict()
-                except FileNotFoundError:
-                    secrets = {}
-                secret, configured_model = configuration(secrets)
-                provider = OpenAINormalizer(secret, configured_model)
-            with st.spinner('Нормализуем кандидатов и проверяем план группировки…'):
-                artifact = normalize_analysis(analysis, provider, model=model)
-            actual_key = artifact['normalization_id']
-            maps[actual_key] = artifact
-            origins[actual_key] = 'generated'
-            key = actual_key
+            maps[key] = restore_normalized(uploaded.getvalue(), analysis, model, provider_name)
+            origins[key] = 'imported'
+            st.session_state.pop('process_error', None)
             st.rerun()
         except ProcessError as exc:
-            st.error('Ошибка второго этапа: ' + str(exc) + ' Исходный анализ сохранён; извлекать НПА заново не требуется.')
-            metrics = exc.metrics if isinstance(exc, NormalizationError) else {
-                'requests': 0, 'elapsed_seconds': time.perf_counter()-attempt_started, 'usage': None}
-            st.session_state.setdefault('normalization_failures', {})[key] = metrics
-            st.caption(f"Запросов: {metrics['requests']} · Время: {metrics['elapsed_seconds']:.1f} с")
-        finally:
-            if provider:
-                provider.close()
-    artifact = maps.get(key)
+            st.error('Восстановление карты: ' + str(exc))
     if artifact:
-        if origins.get(key) == 'imported' and not technical:
-            st.caption('Карта восстановлена из normalized_processes.json без вызова API.')
-        if not technical:
-            render_map(artifact)
-        else:
-            _source_notices(len(analysis.raw['rejected_candidates']))
-            render_opportunity_testing(artifact, analysis)
-            st.write('Нормализация: ' + ('восстановлена из JSON' if origins.get(key) == 'imported' else 'выполнена в сессии'))
-            st.json(artifact['metrics'])
-            st.caption('Метрики относятся к сохранённому запуску нормализации. Время и токены старого извлечения неизвестны, '
-                       'если их нет в исходном файле.')
-            if st.checkbox('Показать учёт ID и спорные решения', key='show-accounting'):
-                st.json({k: artifact['map'][k] for k in ('accounting', 'issues', 'missing_from_plan', 'deferred_source_action_ids')})
-            if st.checkbox('Показать проверенные доказательства и координаты', key='show-normalized-proofs'):
-                st.json(artifact['map']['evidence'])
+        if st.button('Повторить только нормализацию', help='Один новый платный запрос; извлечение не повторяется.'):
+            try:
+                with st.spinner('Анализ выполняется…'): normalize_processes(analysis)
+                st.rerun()
+            except ProcessError as exc: st.error('Не удалось обновить карту: ' + str(exc))
+        st.caption('Карта: ' + ('восстановлена без API' if origins.get(key) == 'imported' else 'получена в сессии'))
+        if st.checkbox('Показать карту и доказательства', key='inspect-map'): render_map(artifact)
+        if st.checkbox('Показать учёт ID и спорные решения', key='show-accounting'):
+            st.json({k: artifact['map'][k] for k in ('accounting', 'issues', 'missing_from_plan', 'deferred_source_action_ids')})
+        if st.checkbox('Показать проверенные доказательства и координаты', key='show-normalized-proofs'):
+            st.json(artifact['map']['evidence'])
+        st.json(artifact['metrics'])
         st.download_button('Скачать normalized_processes.json', lambda: json.dumps(artifact, ensure_ascii=False, indent=2),
                            file_name='normalized_processes.json', mime='application/json', on_click='ignore')
-        st.download_button('Скачать отчёт Markdown', lambda: markdown_report(artifact, analysis.raw['metadata']),
+        st.download_button('Скачать карту Markdown', lambda: markdown_report(artifact, analysis.raw['metadata']),
                            file_name='process-map.md', mime='text/markdown', on_click='ignore')
-    else:
-        _source_notices(len(analysis.raw['rejected_candidates']))
-    if technical:
-        if key in st.session_state.get('normalization_failures', {}):
-            st.caption('Метрики последней неудачной попытки нормализации')
-            st.json(st.session_state.normalization_failures[key])
-        st.json({k: analysis.raw.get(k) for k in ('coverage', 'execution', 'rejected_candidates', 'warnings', 'limitations')})
+    if key in st.session_state.get('normalization_failures', {}):
+        st.caption('Последняя ошибка нормализации'); st.json(st.session_state.normalization_failures[key])
+    st.json({k: analysis.raw.get(k) for k in ('coverage', 'execution', 'rejected_candidates', 'warnings', 'limitations')})
     st.download_button('Скачать процессы JSON', analysis.original_bytes, file_name='processes.json',
-                       help='Исходный результат извлечения без изменений.', mime='application/json', on_click='ignore')
+                       help='Исходный результат без изменений.', mime='application/json', on_click='ignore')
+    return artifact

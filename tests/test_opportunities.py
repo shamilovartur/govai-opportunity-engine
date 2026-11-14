@@ -65,7 +65,7 @@ def test_incomplete_map_preserves_warning_and_blocks_disputed_action_as_financia
     assert all(x['reasons'] for x in r['portfolio']['excluded_from_total'])
 
 
-@pytest.mark.parametrize('fault', ['action','source','evidence','foreign_evidence','relationship','duplicate_id','missing_parameters'])
+@pytest.mark.parametrize('fault', ['action','source','evidence','foreign_evidence','relationship','duplicate_id'])
 def test_bad_ids_and_invalid_plans_fail_before_any_report(fault):
     _,_,a,n=simple_map(('Специалист готовит проект ответа.','Специалист проверяет документ.'))
     p=proposal(n,['op-0']); rel=[]
@@ -74,7 +74,6 @@ def test_bad_ids_and_invalid_plans_fail_before_any_report(fault):
     elif fault=='evidence': p['evidence_refs']=['invented']
     elif fault=='foreign_evidence': p['evidence_refs']=n['map']['actions'][1]['evidence_refs']
     elif fault=='relationship': rel=[{'left':'pilot','right':'missing','relation':'complementary','reason':'wrong'}]
-    elif fault=='missing_parameters': p['required_parameters']=[]
     rows=[p,p] if fault=='duplicate_id' else [p]
     with pytest.raises(ProcessError): generate_opportunities(n,a,OpportunityMock(plan(*rows,relationships=rel)))
 
@@ -425,3 +424,48 @@ def test_fields_removed_by_extraction_are_not_reintroduced_as_context():
     payload,_=prepare_request(n,a); serialized=json.dumps(payload,ensure_ascii=False)
     assert 'ВЫДУМАННЫЙ_ИСПОЛНИТЕЛЬ' not in serialized and 'НЕСУЩЕСТВУЮЩАЯ_ЦИТАТА' not in serialized
     assert len(payload['source_candidates'])==1 and payload['quotes']
+
+
+@pytest.mark.parametrize('parameters', [[], ['annual_cases'], ['before_minutes', 'after_minutes']])
+def test_missing_service_parameter_names_are_completed_without_inventing_values(parameters):
+    _,_,a,n=simple_map(); row=proposal(n,required_parameters=parameters)
+    original=deepcopy(row)
+    provider=OpportunityMock(plan(row)); saved=generate_opportunities(n,a,provider)
+    assert row==original and len(provider.calls)==1
+    assert saved['plan']['proposals'][0]['required_parameters']==list(REQUIRED)
+    item=saved['report']['initiatives'][0]
+    assert item['required_parameters']==item['economics']['required_parameters']==list(REQUIRED)
+    assert item['economics']['status']=='needs_data' and item['economics']['scenarios']==[]
+    assert all(p['value'] is None for p in item['economics']['input_parameters'].values())
+    assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==saved
+
+
+def test_received_plan_survives_assembly_error_and_rebuilds_locally(monkeypatch):
+    import govai.opportunities as module
+    _,_,a,n=simple_map(); provider=OpportunityMock(plan(proposal(n,required_parameters=[])))
+    session={}; assemble=module.assemble_report
+    def broken(*args,**kwargs): raise RuntimeError('private internal detail')
+    monkeypatch.setattr(module,'assemble_report',broken)
+    with pytest.raises(OpportunityError) as error:
+        generate_opportunities(n,a,provider,on_plan=lambda p:session.update(plan=p))
+    assert 'private' not in str(error.value) and 'report' not in session['plan']
+    assert session['plan']['plan']['proposals'][0]['required_parameters']==list(REQUIRED)
+    assert session['plan']['metrics']['requests']==1
+    monkeypatch.setattr(module,'assemble_report',assemble)
+    result=generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=session['plan'])
+    assert result['report']['initiatives'] and len(provider.calls)==1
+    assert result['metrics']['requests']==1  # original paid attempt, not a second request
+    assert result['metrics']['usage']==session['plan']['metrics']['usage']
+    bad=deepcopy(session['plan']); bad['plan']['proposals'][0]['evidence_refs']=['invented']
+    with pytest.raises(ProcessError,match='доказательства'):
+        generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=bad)
+    bad_map=deepcopy(n); next(iter(bad_map['map']['evidence'].values()))['quote']='подмена'
+    with pytest.raises(ProcessError):
+        generate_opportunities(bad_map,a,None,model='test-model',provider_name='openai',saved_plan=session['plan'])
+    _,_,other_a,other_n=simple_map(('Другой орган рассматривает другой документ.',))
+    with pytest.raises(ProcessError,match='не соответствует'):
+        generate_opportunities(other_n,other_a,None,model='test-model',provider_name='openai',saved_plan=session['plan'])
+    with pytest.raises(ProcessError,match='не соответствует'):
+        generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=session['plan'],
+                               settings=OpportunitySettings(max_input_bytes=390000))
+    assert len(provider.calls)==1

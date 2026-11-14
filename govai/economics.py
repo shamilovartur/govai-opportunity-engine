@@ -122,9 +122,16 @@ def calculate_scenario(scenario: Scenario | dict) -> dict:
         raise ProcessError('Некорректные параметры экономики: проверьте происхождение, единицы, доли и конечные числа.') from exc
 
 
+def required_parameters(model):
+    """Service metadata is derived from the calculator, never required from an LLM."""
+    if model not in ('time_capacity', 'qualitative'):
+        raise ProcessError('Неизвестная экономическая модель.')
+    return list(REQUIRED) if model == 'time_capacity' else []
+
+
 def assess_economics(model, *, blocked_reasons=(), scenarios=None, allow_illustrative=False):
     """No hidden factual defaults. Illustration is an explicit, separately marked case."""
-    missing = list(REQUIRED) if model == 'time_capacity' else []
+    missing = required_parameters(model)
     if blocked_reasons or model == 'qualitative' or (scenarios is None and not allow_illustrative):
         return {'model': model, 'status': 'needs_data', 'scenarios': [], 'input_parameters': unknown_parameters(),
                 'required_parameters': missing, 'reasons': list(blocked_reasons) or [

@@ -12,7 +12,7 @@ from govai.extraction import (
 )
 from govai.url_input import extract_url_document
 from govai.process_ui import render_processes
-from govai.document_ui import document_header, technical_document
+from govai.document_ui import document_header
 
 
 def _load_input():
@@ -41,7 +41,7 @@ def _load_input():
         help='PDF должен содержать текстовый слой. Распознавание сканов пока не поддерживается.',
     )
     if uploaded_file is None:
-        st.info('Добавьте файл — извлечённый текст появится здесь.')
+        st.info('Добавьте документ, чтобы начать анализ.')
         return None
     encoding = 'utf-8-sig'
     if Path(uploaded_file.name).suffix.lower() == '.txt':
@@ -57,17 +57,15 @@ def _load_input():
 
 
 def main() -> None:
-    st.set_page_config(page_title="GovAI — карта процессов", page_icon="📄")
-    if st.session_state.get('process_result'):
-        st.caption("GovAI Opportunity Engine")
-    else:
-        st.title("GovAI Opportunity Engine")
-        st.write("Загрузите НПА или продолжите работу с готовым анализом, чтобы построить карту процессов.")
+    st.set_page_config(page_title="GovAI — анализ НПА", page_icon="📄")
+    st.title("GovAI Opportunity Engine")
+    st.write("Загрузите НПА → извлеките процессы → получите отчёт об AI-возможностях.")
+    st.subheader('1. Загрузите документ')
     with st.expander('Документ и загрузка', expanded=not bool(st.session_state.get('process_result'))):
         st.caption("PDF, DOCX или TXT · Один файл до 10 МБ")
         document = _load_input()
     if document is None:
-        for key in ('process_result', 'process_document', 'process_result_bytes', 'verified_analysis', 'process_origin'):
+        for key in ('process_result', 'process_document', 'process_result_bytes', 'verified_analysis', 'process_origin', 'process_error'):
             st.session_state.pop(key, None)
         return
 
@@ -82,11 +80,7 @@ def main() -> None:
     if not st.session_state.get('process_result'):
         st.success("Документ загружен.")
     document_header(document)
-    view = st.radio('Раздел приложения', ['Карта процессов', 'Технические данные'], horizontal=True)
-    technical = view == 'Технические данные'
-    if technical:
-        technical_document(document)
-    render_processes(document, technical=technical)
+    render_processes(document)
 
 
 if __name__ == "__main__":

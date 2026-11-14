@@ -67,11 +67,14 @@ def test_import_normalize_navigation_and_conditional_evidence_never_repeat_api(m
         assert app.session_state['process_origin'] == 'imported'
         assert app.session_state['process_result_bytes'] == original
         assert UIProvider.calls_total == 0
-        button(app, 'Построить карту процессов').click().run()
+        button(app, 'Продолжить анализ').click().run()
         assert not app.exception and not app.error
         assert UIProvider.calls_total == 1
         assert not app.text_area
         assert not any('Секретарь регистрирует заявление' in t.value for t in app.text)
+        assert any(x.value == 'Процессы готовы.' for x in app.success)
+        assert not any(s.label == 'Раздел карты' for s in app.selectbox)
+        next(c for c in app.checkbox if c.label == 'Показать карту и доказательства').check().run()
         picker = next(s for s in app.selectbox if s.label == 'Выберите процесс')
         picker.set_value('dispatch').run()
         next(c for c in app.checkbox if c.label == 'Показать детали действия').check().run()
@@ -101,7 +104,8 @@ def test_restore_normalized_in_new_session_with_no_key_and_no_api(monkeypatch):
         button(app, 'Восстановить карту').click().run()
         assert not app.exception and not app.error
         assert app.session_state['normalized_origins'][artifact['normalization_id']] == 'imported'
-        assert any(s.label == 'Выберите процесс' for s in app.selectbox)
+        assert any(s.value == 'Процессы готовы.' for s in app.success)
+        assert not any(s.label == 'Выберите процесс' for s in app.selectbox)
         app.run()
         normalize.assert_not_called()
 
@@ -117,9 +121,9 @@ def test_normalizer_error_preserves_original_and_does_not_request_extraction(mon
          patch('govai.process_ui.extract_with_checkpoint', side_effect=AssertionError('No extraction')):
         app = AppTest.from_file(str(APP)).run()
         button(app, 'Импортировать результат').click().run()
-        button(app, 'Построить карту процессов').click().run()
+        button(app, 'Продолжить анализ').click().run()
         assert not app.exception
-        assert 'Ошибка второго этапа' in app.error[0].value
+        assert 'Анализ не завершён' in app.error[0].value
         assert app.session_state['process_result_bytes'] == original
         assert any(b.label == 'Скачать процессы JSON' for b in app.get('download_button'))
         assert not any(b.label == 'Скачать normalized_processes.json' for b in app.get('download_button'))
@@ -134,8 +138,22 @@ def test_missing_key_for_normalization_is_not_a_request_to_repeat_extraction(mon
          patch('govai.map_ui.OpenAINormalizer') as factory:
         app = AppTest.from_file(str(APP)).run()
         button(app, 'Импортировать результат').click().run()
-        button(app, 'Построить карту процессов').click().run()
+        button(app, 'Продолжить анализ').click().run()
         assert not app.exception
-        assert 'второго этапа' in app.error[0].value and 'OPENAI_API_KEY' in app.error[0].value
+        assert 'Анализ не завершён' in app.error[0].value and 'OPENAI_API_KEY' in app.error[0].value
         assert app.session_state['process_result_bytes'] == original
         factory.assert_not_called()
+
+
+class AutomaticNormalizer:
+    """A deterministic mock response for UI sequencing, never a live model."""
+    name='mock'
+    calls_total=0
+    def __init__(self, key, model): self.model=model
+    def close(self): pass
+    def normalize(self, payload, **kwargs):
+        from types import SimpleNamespace
+        type(self).calls_total += 1
+        a=SimpleNamespace(actions={x['id']:x for x in payload['actions']})
+        return plan_for(a,[node(a,[sid],key=f'op-{i}',title=x['description'])
+                           for i,(sid,x) in enumerate(a.actions.items())],titles={'p1':'Работа с обращением'}),None

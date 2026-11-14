@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,14 +15,8 @@ APP = Path(__file__).resolve().parents[1] / 'app.py'
 def upload(text):
     return UploadedFile(UploadedFileRec('test', 'document.txt', 'text/plain', text.encode()), FileURLs())
 
-def technical(app):
-    next(r for r in app.radio if r.label == 'Раздел приложения').set_value('Технические данные').run()
-    return app
-
-
-
 def button(app):
-    return next(b for b in app.button if b.label == 'Извлечь процессы')
+    return next(b for b in app.button if b.label in ('Извлечь процессы', 'Продолжить анализ'))
 
 
 class Provider:
@@ -48,7 +43,7 @@ def test_missing_key_visible_and_never_calls_provider(monkeypatch):
     with patch('streamlit.file_uploader', return_value=upload('1. Зарегистрировать обращение.\n')), \
          patch('streamlit.runtime.secrets.Secrets.to_dict', return_value={}), \
          patch('govai.process_ui.OpenAIProvider') as factory:
-        app = technical(AppTest.from_file(str(APP)).run())
+        app = AppTest.from_file(str(APP)).run()
         button(app).click().run()
         assert not app.exception
         assert 'OPENAI_API_KEY' in app.error[0].value
@@ -61,12 +56,13 @@ def test_hierarchy_evidence_export_rerun_and_changed_document(monkeypatch):
     monkeypatch.setenv('OPENAI_MODEL', 'ui-test')
     with patch('streamlit.file_uploader', return_value=upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider):
-        app = technical(AppTest.from_file(str(APP)).run())
+        app = AppTest.from_file(str(APP)).run()
         button(app).click().run()
         assert not app.exception and not app.error
         assert len(app.session_state['process_result']['procedures']) == 1
         assert 'verified_analysis' in app.session_state
-        assert not app.text  # raw action details are not all rendered on extraction
+        assert any(x.value == 'Процессы готовы.' for x in app.success)
+        assert not any('Зарегистрировать обращение' == t.value for t in app.text)
         assert any(b.label == 'Скачать процессы JSON' for b in app.get('download_button'))
         assert any(e['clause_number'] == '1' for e in app.session_state['verified_analysis'].evidence.values())
         app.run()
@@ -82,15 +78,20 @@ def test_completed_checkpoint_skips_api_on_repeated_analysis(monkeypatch):
     monkeypatch.setenv('OPENAI_MODEL', 'ui-test')
     with patch('streamlit.file_uploader', return_value=upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider):
-        app = technical(AppTest.from_file(str(APP)).run())
+        app = AppTest.from_file(str(APP)).run()
         button(app).click().run()
-        assert 'process_result' in app.session_state
-        with patch.object(Provider, 'extract', side_effect=AssertionError('Repeated API call')) as extract:
-            button(app).click().run()
-            extract.assert_not_called()
-        assert not app.exception
-        assert not app.error
-        assert app.session_state['process_result']['execution']['blocks_reused'] == 1
+        checkpoint=next(iter(app.session_state['process_checkpoints'].values()))
+        data=dump_checkpoint(checkpoint)
+    restored=UploadedFile(UploadedFileRec('checkpoint','saved.json','application/json',data),FileURLs())
+    with patch('streamlit.file_uploader',side_effect=lambda label,**kw: restored if label=='Checkpoint JSON' else upload('1. Исполнитель регистрирует обращение.\n')), \
+         patch('govai.process_ui.OpenAIProvider',Provider), \
+         patch.object(Provider,'extract',side_effect=AssertionError('Repeated API call')) as extract:
+        second=AppTest.from_file(str(APP)).run()
+        next(b for b in second.button if b.label=='Восстановить checkpoint').click().run()
+        button(second).click().run()
+        extract.assert_not_called()
+        assert not second.exception and not second.error
+        assert second.session_state['process_result']['execution']['blocks_reused']==1
 
 
 def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
@@ -113,7 +114,7 @@ def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
     with patch('streamlit.file_uploader', side_effect=lambda label, **kw:
                None if label == 'Checkpoint JSON' else document_upload), \
          patch('govai.process_ui.OpenAIProvider', InterruptOnce):
-        first = technical(AppTest.from_file(str(APP)).run())
+        first = AppTest.from_file(str(APP)).run()
         button(first).click().run()
         assert not first.exception
         assert 'Успешно обработано блоков: 1/3' in first.error[0].value
@@ -128,7 +129,7 @@ def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
     with patch('streamlit.file_uploader', side_effect=lambda label, **kw:
                restored_upload if label == 'Checkpoint JSON' else document_upload), \
          patch('govai.process_ui.OpenAIProvider', InterruptOnce):
-        second = technical(AppTest.from_file(str(APP)).run())  # new session, no shared Streamlit state
+        second = AppTest.from_file(str(APP)).run()  # new session, no shared Streamlit state
         assert not second.session_state['process_checkpoints']
         next(b for b in second.button if b.label == 'Восстановить checkpoint').click().run()
         assert not second.exception and not second.error
@@ -146,7 +147,8 @@ def test_partial_error_download_and_restore_in_fresh_session(monkeypatch):
         next(b for b in second.button if b.label == 'Восстановить checkpoint').click().run()
         assert not second.exception
         assert len(next(iter(second.session_state['process_checkpoints'].values()))['results']) == 3
-        button(second).click().run()
+        second.run()
+        assert not any(b.label in ('Извлечь процессы','Продолжить анализ') for b in second.button)
         assert InterruptOnce.calls == ['chunk-1', 'chunk-2', 'chunk-2', 'chunk-3']
 
 
@@ -162,9 +164,43 @@ def test_incompatible_import_rejected_without_api_or_state_replacement(monkeypat
                uploaded if label == 'Checkpoint JSON' else upload('1. Исполнитель регистрирует обращение.\n')), \
          patch('govai.process_ui.OpenAIProvider', Provider), \
          patch.object(Provider, 'extract', side_effect=AssertionError('Must not call API')) as api:
-        app = technical(AppTest.from_file(str(APP)).run())
+        app = AppTest.from_file(str(APP)).run()
         next(b for b in app.button if b.label == 'Восстановить checkpoint').click().run()
         assert not app.exception
         assert 'несовместим' in app.error[0].value
         assert not app.session_state['process_checkpoints']
         api.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def mock_normalization_stage():
+    from test_map_ui import AutomaticNormalizer
+    AutomaticNormalizer.calls_total=0
+    with patch('govai.map_ui.OpenAINormalizer',AutomaticNormalizer):
+        yield
+
+
+def test_checkpoint_download_is_registered_before_api_and_reads_latest_snapshot(monkeypatch):
+    import json
+    import streamlit as st
+    monkeypatch.setenv('OPENAI_API_KEY', 'unit-test-placeholder')
+    monkeypatch.setenv('OPENAI_MODEL', 'ui-test')
+    snapshots = []; downloads = []
+    original_download = st.download_button
+    def download(label, data, **kwargs):
+        if label == 'Скачать checkpoint JSON': downloads.append(data)
+        return original_download(label, data, **kwargs)
+    class InspectProvider(Provider):
+        def extract(self, payload):
+            assert downloads, 'Checkpoint download must exist while the analysis is still running'
+            snapshots.append(json.loads(downloads[0]())['results'])
+            return super().extract(payload)
+    text = 'Раздел 1. Приём\n1. Исполнитель регистрирует обращение.\n\nРаздел 2. Ответ\n2. Исполнитель готовит ответ.'
+    with patch('streamlit.file_uploader', return_value=upload(text)), \
+         patch('streamlit.download_button', side_effect=download), \
+         patch('govai.process_ui.OpenAIProvider', InspectProvider):
+        app = AppTest.from_file(str(APP)).run()
+        button(app).click().run()
+        assert not app.exception and not app.error
+        assert [len(snapshot) for snapshot in snapshots] == [0, 1]
+        assert len(json.loads(downloads[0]())['results']) == 2

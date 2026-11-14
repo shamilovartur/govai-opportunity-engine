@@ -12,9 +12,9 @@ APP = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def technical(app, fragments=False):
-    view = next((r for r in app.radio if r.label == 'Раздел приложения'), None)
-    if view:
-        view.set_value('Технические данные').run(timeout=15)
+    toggle = next((c for c in app.checkbox if c.label == 'Показать исходный текст и структуру'), None)
+    if toggle:
+        toggle.check().run(timeout=15)
         if fragments:
             next(c for c in app.checkbox if c.label == 'Показать фрагменты и ссылки на пункты').check().run(timeout=15)
     return app
