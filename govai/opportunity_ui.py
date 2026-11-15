@@ -12,10 +12,10 @@ from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids,
                                  export_opportunity_plan, restore_opportunity_plan)
-from govai.opportunity_report import (business_text, economic_summary, initiative_title,
-                                      render_markdown, _safe as escape_text)
+from govai.opportunity_report import (management_view, render_markdown, render_details,
+                                      _safe as escape_text)
 from govai.processes import ProcessError
-from govai.report_export import render_docx, render_bundle
+from govai.report_export import EXPORT_VERSION, render_pdf, render_docx, render_bundle
 
 
 def opportunity_state(normalized):
@@ -27,42 +27,66 @@ def opportunity_state(normalized):
 
 
 def _exports(key, artifact):
-    """Prepare presentation bytes locally; keep a successful set tied to the full artifact."""
+    """Prepare each format once per result/version, including failed outcomes.
+
+    Reopening the technical section or downloading must not repeat rendering.
+    Explicit restoration clears this cache and permits a new local attempt.
+    """
     cache = st.session_state.setdefault('opportunity_exports', {})
-    fingerprint = digest(artifact)
+    fingerprint = digest({'artifact': artifact, 'export_version': EXPORT_VERSION})
     saved = cache.get(key)
-    if saved and saved['fingerprint'] == fingerprint and all(saved[name] is not None for name in ('docx', 'zip', 'markdown', 'json')):
+    if saved and saved['fingerprint'] == fingerprint:
         return saved
-    files = {'fingerprint': fingerprint}
-    try: files['json'] = json.dumps(artifact, ensure_ascii=False, indent=2).encode('utf-8')
-    except Exception: files['json'] = None
-    try: files['markdown'] = render_markdown(artifact).encode('utf-8')
-    except Exception: files['markdown'] = None
-    try: files['docx'] = render_docx(artifact)
-    except Exception: files['docx'] = None
-    files['zip'] = None
-    if all(files[name] is not None for name in ('docx', 'markdown', 'json')):
+    started = time.perf_counter()
+    files = {'fingerprint': fingerprint, 'failed': [], 'view': None}
+    try:
+        files['view'] = management_view(artifact)
+    except Exception:
+        files['failed'].append('Представление отчёта')
+    preparation = {
+        'json': ('JSON', lambda: json.dumps(artifact, ensure_ascii=False, indent=2).encode('utf-8')),
+        'details': ('Подробные материалы', lambda: render_details(artifact).encode('utf-8')),
+        'markdown': ('Markdown', lambda: render_markdown(artifact, view=files['view']).encode('utf-8')),
+        'docx': ('DOCX', lambda: render_docx(artifact, view=files['view'])),
+        'pdf': ('PDF', lambda: render_pdf(artifact, view=files['view'])),
+    }
+    for name, (label, prepare) in preparation.items():
         try:
-            files['zip'] = render_bundle(artifact, docx_data=files['docx'],
-                                        markdown_data=files['markdown'], json_data=files['json'])
-        except Exception: pass
+            if files['view'] is None and name in ('markdown', 'docx', 'pdf'):
+                raise ValueError('Report presentation unavailable')
+            files[name] = prepare()
+        except Exception:
+            files[name] = None
+            files['failed'].append(label)
+    files['zip'] = None
+    if files['json'] is not None:
+        try:
+            files['zip'] = render_bundle(artifact, pdf_data=files['pdf'], docx_data=files['docx'],
+                markdown_data=files['markdown'], json_data=files['json'], details_data=files['details'],
+                view=files['view'])
+        except Exception:
+            files['failed'].append('ZIP')
+    files['elapsed_seconds'] = time.perf_counter() - started
     cache[key] = files
     return files
 
 
-def _source_downloads(files, *, prefix):
+def _source_downloads(files, *, prefix, include_pdf=False):
     """Fallback and technical exports remain independently available."""
-    if files['markdown'] is not None:
-        st.download_button('Скачать Markdown', files['markdown'], file_name='opportunity-report.md',
-                           mime='text/markdown', on_click='ignore', key=prefix+'-markdown', width='stretch')
-    else:
-        st.warning('Не удалось подготовить Markdown. Сохраните доступный JSON; повторная генерация не нужна.')
-    if files['json'] is not None:
-        st.download_button('Скачать данные анализа (JSON)', files['json'], file_name='opportunities.json',
-                           mime='application/json', on_click='ignore', key=prefix+'-json', width='stretch')
-    else:
-        st.warning('Не удалось подготовить JSON для восстановления. Сохраните доступный отчёт; '
-                   'данные остаются только в текущей сессии.')
+    formats = [
+        ('docx', 'Скачать отчёт (DOCX)', 'opportunity-report.docx',
+         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        ('markdown', 'Скачать Markdown', 'opportunity-report.md', 'text/markdown'),
+        ('details', 'Скачать подробные материалы', 'opportunity-details.txt', 'text/plain'),
+        ('json', 'Скачать данные анализа (JSON)', 'opportunities.json', 'application/json'),
+    ]
+    if include_pdf:
+        formats.insert(0, ('pdf', 'Скачать отчёт (PDF)', 'opportunity-report.pdf', 'application/pdf'))
+    for name, label, filename, mime in formats:
+        if files[name] is not None:
+            st.download_button(label, files[name], file_name=filename, mime=mime,
+                               on_click='ignore', key=prefix+'-'+name, width='stretch')
+
 
 @st.fragment(run_every=1)
 def _wait_for_report(key):
@@ -136,56 +160,53 @@ def render_opportunities(normalized, analysis):
                         in_flight.pop(key, None)
             st.rerun()
         return
-    # Eager immutable exports share one artifact. Cache only a complete export set;
-    # failed preparation is retried locally on rerender, never by calling the model.
+    # All presentations share a cached view and already prepared bytes.
     files = _exports(key, artifact)
-    docx_data, bundle_data = files['docx'], files['zip']
-    if docx_data is not None:
-        st.success('Отчёт готов.')
-        st.download_button('Скачать отчёт (DOCX)', docx_data, type='primary',
-                           file_name='opportunity-report.docx',
-                           mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    st.success('Отчёт готов.')
+    if files['pdf'] is not None:
+        st.download_button('Скачать отчёт (PDF)', files['pdf'], type='primary',
+                           file_name='opportunity-report.pdf', mime='application/pdf',
                            on_click='ignore', width='stretch')
-    else:
-        st.error('Не удалось подготовить DOCX. Результат сохранён в текущей сессии; повторная генерация не нужна. '
-                 'Сохраните доступные JSON и Markdown.')
-    if bundle_data is not None:
-        st.download_button('Скачать все результаты (ZIP)', bundle_data,
-                           file_name='govai-results.zip', mime='application/zip', on_click='ignore', width='stretch')
-    else:
-        st.warning('Полный архив пока не подготовлен. Доступные файлы можно сохранить отдельно; '
-                   'перерисовка страницы повторит только локальную подготовку файлов.')
+    if files['zip'] is not None:
+        label = 'Скачать доступные результаты (ZIP)' if files['failed'] else 'Скачать все результаты (ZIP)'
+        st.download_button(label, files['zip'], file_name='govai-results.zip', mime='application/zip',
+                           on_click='ignore', width='stretch')
+    if files['failed']:
+        st.warning('Не удалось подготовить: ' + ', '.join(files['failed']) +
+                   '. Остальные файлы доступны. Повторный запрос к модели не нужен. '
+                   + ('Сохраните JSON; после его восстановления можно повторить локальную подготовку файлов.'
+                      if files['json'] is not None else 'Сохраните доступные документы; полный JSON сейчас подготовить не удалось.'))
         _source_downloads(files, prefix='fallback')
     st.caption('Сохраните архив: он содержит отчёт и полный JSON для восстановления. '
                'Без скачанной копии результат может быть потерян после завершения сессии.')
     report = artifact['report']
-    st.warning('Перспективность пилота не доказывает окупаемость или готовность к внедрению. '
-               'Сценарные оценки — предположения для проверки, а не фактические показатели ведомства.'
-               + (' Часть группировки процессов не подтверждена; это ограничивает числовые оценки.'
-                  if report['normalization_status'] != 'completed' else ''))
+    warning = ('Это предложения для проверки, а не полученный эффект или доказанная окупаемость. '
+               'Сценарные числа не являются измерениями ведомства.')
+    if report['normalization_status'] != 'completed':
+        warning += ' Для части операций нужно уточнить границы и участников до количественных выводов.'
     quarantined = sum(r.get('origin') == 'integrity_validator' for r in report['rejected'])
     if quarantined:
-        st.warning(f'Инициатив с неподтверждёнными источниками отложено: {quarantined}. '
-                   'Они не включены в принятые рекомендации и числовые эффекты; причины сохранены в отчёте.')
-    st.caption(f"Инициатив: {len(report['initiatives'])}. Эффекты разных инициатив не суммируются без подтверждения независимости.")
-    category = None
-    for position, a in enumerate(report['initiatives'], 1):
-        prospect = a['prospect']
-        if prospect['category'] != category:
-            category = prospect['category']
-            st.subheader(prospect['label'])
+        warning += (f' Инициатив с неподтверждёнными источниками отложено: {quarantined}. '
+                    'Они не включены в принятые рекомендации и числовые эффекты.')
+    st.warning(warning)
+    view = files['view']
+    if view is None:
+        st.info('Не удалось подготовить краткое представление. Сохранённый JSON и доступные форматы можно скачать выше.')
+        return
+    st.subheader('Главное для руководителя')
+    for block in view['summary_blocks']:
+        st.markdown('**' + escape_text(block['label']) + '**')
+        st.write(escape_text(block['text']))
+    st.subheader('Предлагаемые инициативы')
+    st.caption(f"Инициатив: {len(view['initiatives'])}. Номер — предварительная очередь проверки; эффекты не суммируются автоматически.")
+    for row in view['initiatives']:
         with st.container(border=True):
-            presentation = a.get('presentation', {})
-            # A genuine legacy report has no persisted presentation number; its
-            # stable qualitative order remains visible without modifying its IDs.
-            title = initiative_title({**a, 'sequence_number': a.get('sequence_number', position)})
-            st.markdown(f"**{escape_text(title)}**")
-            st.write(escape_text(business_text(a['ai_role'])))
-            st.caption(escape_text(business_text(prospect['reason'])))
-            st.caption('Эффект: ' + escape_text(economic_summary(a)))
-            st.caption('Что проверить: ' + escape_text(business_text(
-                presentation.get('main_condition_short') or prospect['main_uncertainty'])))
-    if not report['initiatives']: st.info(report['explanation'])
+            st.markdown('**' + escape_text(f"№ {row['number']}. {row['title']}") + '**')
+            st.caption(escape_text(row['category_label']))
+            st.write(escape_text(row['benefit']))
+            st.caption('Главное условие: ' + escape_text(row['condition']))
+            if row['clauses']:
+                st.caption('Основания: ' + escape_text(row['clauses']))
 
 
 def render_opportunity_technical(normalized, analysis):
@@ -197,6 +218,7 @@ def render_opportunity_technical(normalized, analysis):
     if st.button('Восстановить отчёт', disabled=uploaded is None or busy):
         try:
             reports[key] = restore_opportunities(uploaded.getvalue(), normalized, analysis, model, provider_name)
+            st.session_state.setdefault('opportunity_exports', {}).pop(key, None)
             st.session_state.setdefault('opportunity_origins', {})[key] = 'imported'
             st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
             st.session_state.setdefault('opportunity_plans', {}).pop(key, None)
@@ -213,7 +235,9 @@ def render_opportunity_technical(normalized, analysis):
         except ProcessError as exc: st.error('Восстановление плана: ' + str(exc))
     artifact = reports.get(key)
     if artifact:
-        _source_downloads(_exports(key, artifact), prefix='technical')
+        files = _exports(key, artifact)
+        _source_downloads(files, prefix='technical')
+        st.caption(f"Подготовка файлов: {files['elapsed_seconds']:.2f} с. Повторное открытие использует готовые файлы.")
         st.caption('Отчёт восстановлен без API.' if st.session_state.get('opportunity_origins', {}).get(key) == 'imported'
                    else 'Отчёт сформирован в текущей сессии.')
         st.json(artifact['metrics'])

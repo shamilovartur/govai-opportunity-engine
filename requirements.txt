@@ -6,3 +6,5 @@ dnspython==2.9.2
 urllib3==2.8.0
 openai==2.54.0
 pydantic==2.14.3
+
+reportlab==5.1.0

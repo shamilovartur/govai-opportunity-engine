@@ -1,4 +1,5 @@
 import json
+import re
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -11,10 +12,15 @@ from govai.extraction import extract_document
 from govai.normalization import normalize_analysis
 from govai.opportunities import (OpportunityPlan, OpportunityError, OpportunitySettings, generate_opportunities,
     restore_opportunities, prepare_request, economic_restrictions, operational_action_ids, compact_input)
-from govai.opportunity_report import render_markdown, assess_prospects
+from govai.opportunity_report import render_markdown, render_details, management_view, assess_prospects
 from govai.processes import ProcessError, Candidates, extract_processes
 from opportunity_helpers import map_case, simple_map, agency_map, proposal, three_proposals, OpportunityMock, supplied_scenarios, prospect_assessment
 from test_normalization import Normalizer, node, plan_for
+
+
+def _read_markdown(text):
+    """Compare visible wording, independent of Markdown punctuation escaping."""
+    return re.sub(r'\\([\\`*_{}\[\]()#+.!<>|])', r'\1', text)
 
 
 def plan(*rows, rejected=None, relationships=None):
@@ -40,11 +46,14 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
                 for e in s['evidence_refs']:
                     assert result['report']['evidence'][e]==a.evidence[e]
     text=render_markdown(result)
-    for heading in ['Резюме для руководителя','Сравнение AI-инициатив','Перспективные направления для первых пилотов','Ожидаемый эффект и предпосылки оценки','Приложение с источниками']:
+    for heading in ['Главное для руководителя','Предлагаемые инициативы','Какой эффект можно получить','Условия запуска и основания']:
         assert heading in text
     assert '270.00' not in text and '270 000' not in text
-    assert 'требуется измерение на пилоте' in text and '| Сценарий |' not in text
-    assert '**Основание:**' in text and '**Критерий:**' in text and 'Для расчёта нужны:' in text
+    assert '| Сценарий |' not in text
+    assert 'Возможное сокращение повторного ввода' in text
+    details=render_details(result)
+    assert all(proof['quote'] in details for proof in result['report']['evidence'].values())
+    assert all(sid in details for row in result['report']['initiatives'] for sid in row['source_action_ids'])
     assert '/100' not in text and 'балл' not in text.casefold() and 'Токены' not in text
     assert result['report']['portfolio']['total_budget_savings'] is None
     assert result['metrics']['usage']['total_tokens']==150
@@ -524,15 +533,16 @@ def test_management_report_translates_internal_diagnostics_and_keeps_sources_sho
     row=proposal(n,prospect_assessment=assessment,uncertainties=['Не объединено с a98; review.'])
     artifact=generate_opportunities(n,a,OpportunityMock(plan(row)))
     report=render_markdown(artifact)
-    main,appendix=report.split('## Приложение с источниками',1)
+    main,appendix=report,render_details(artifact)
     for forbidden in ('a98','action-123','review','incomplete','не объединено','Токены','/100','weighted_contributions'):
         assert forbidden not in main
-    assert 'Границы операции и распределение ответственности требуют уточнения' in main
+    assert 'часть группировки ещё не подтверждена' in _read_markdown(main)
+    assert 'действие' in _read_markdown(main)
     assert 'Не объединено с a98' in artifact['report']['initiatives'][0]['prospect']['reason']
-    quoted=appendix.split('```text\n',1)[1].split('\n```',1)[0]
-    assert len(quoted)<=300 and quoted.endswith('…')
-    assert any(proof['quote'].startswith(quoted[:-1]) for proof in artifact['report']['evidence'].values())
-    assert 'action-' not in appendix
+    assert all(proof['quote'] in appendix for proof in artifact['report']['evidence'].values())
+    assert 'Не объединено с a98' in appendix
+    assert all(sid in appendix for item in artifact['report']['initiatives'] for sid in item['source_action_ids'])
+    assert '…' not in main
 
 
 def test_llm_time_assumptions_are_individual_hypotheses_not_agency_facts():
@@ -574,8 +584,8 @@ def test_explicit_sample_hours_need_neither_salary_nor_annual_workload():
     assert set(item['required_parameters'])=={'before_minutes','after_minutes','case_count'}
     assert 'hour_cost' not in base['parameters'] and 'annual_cases' not in base['parameters']
     assert 'applicability' not in base['parameters'] and base['budget_savings'] is None
-    assert '133,33 человеко-часа' in render_markdown(saved)
-    assert 'Сценарное допущение' in render_markdown(saved)
+    assert '133,33' in render_markdown(saved) and 'человеко-час' in render_markdown(saved)
+    assert 'Иллюстративный сценарий' in render_markdown(saved)
 
 
 def test_quality_without_observations_keeps_metric_method_and_pilot_criterion():
@@ -589,8 +599,10 @@ def test_quality_without_observations_keeps_metric_method_and_pilot_criterion():
     assert row['economics']['status']=='needs_data' and row['economics']['scenarios']==[]
     assert row['economics']['input_parameters']=={} and row['required_parameters']==[]
     text=render_markdown(result)
-    assert 'Доля существенных доводов' in text and 'экспертная сверка' in text
-    assert 'не пропущены существенные доводы' in text and '%' not in text
+    details=_read_markdown(render_details(result))
+    assert 'Доля существенных доводов' in details and 'экспертная сверка' in details
+    assert 'не пропущены существенные доводы' in details and '%' not in text
+    assert p['expected_effect'] in _read_markdown(text)
 
 
 @pytest.mark.parametrize('fault',['unknown_source','foreign_source','repeated_source','wrong_unit','claimed_user_measurement','claimed_document_measurement'])
@@ -633,7 +645,8 @@ def test_explicit_part_of_disputed_initiative_keeps_measurement_but_unknown_acto
     assert row['economics']['status']=='needs_data' and row['economics']['scenarios']==[]
     assert any('участника' in text for text in row['economics']['reasons'])
     assert row['confidence']['requires_review'] and r['report']['portfolio']['total_budget_savings'] is None
-    assert 'составление ответа не измеряется' in render_markdown(r)
+    assert 'составление ответа не измеряется' in _read_markdown(render_details(r))
+    assert 'границы и участников' in render_markdown(r) and '133,33' not in render_markdown(r)
     money=proposal(n,aids)
     monetary=generate_opportunities(n,a,OpportunityMock(plan(money)),scenario_inputs={'pilot':supplied_scenarios()})
     assert monetary['report']['initiatives'][0]['economics']['scenarios']==[]
@@ -768,7 +781,8 @@ def test_inconsistent_high_prospect_preserves_hypothesis_but_not_high_category(f
     accepted=result['report']['initiatives'][0]
     assert accepted['prospect']['category']=='insufficient' and accepted['prospect']['assessment_issues']
     assert accepted['prospect_assessment']['pilot_feasibility']=='bounded'
-    assert 'Обоснованных кандидатов для первого ограниченного пилота пока нет' in render_markdown(result)
+    assert not management_view(result)['pilots']
+    assert 'Недостаточно оснований' in render_markdown(result)
 
 
 def test_management_text_keeps_substantive_risk_around_internal_labels():
@@ -787,13 +801,14 @@ def test_summary_names_actual_first_pilot_candidates_and_explains_non_ai_alterna
     rows[0]['prospect_assessment']=prospect_assessment(pilot_feasibility='bounded')
     result=generate_opportunities(n,a,OpportunityMock(plan(*rows)))
     text=render_markdown(result)
-    summary=text.split('## Сравнение AI-инициатив')[0]
-    assert rows[0]['title'] in summary and 'повестка обсуждения' in summary
+    summary=text.split('## Предлагаемые инициативы')[0]
+    assert rows[0]['title'] in summary
     assert rows[1]['title'] not in summary
-    cases=text.split('## Перспективные направления для первых пилотов')[1].split('## Ожидаемый эффект')[0]
-    assert '**Почему ИИ:**' in cases and '**Альтернатива без GenAI:**' in cases
-    assert '**Контроль:**' in cases and '**Критерий:**' in cases
+    cases=text.split('## С чего начать')[1].split('## Какой эффект')[0]
+    assert rows[0]['measurement']['success_criterion'] in _read_markdown(cases) and 'специалист' in cases.casefold()
     assert 'не только фиксированный шаблон' in cases or 'фиксированная схема полей' in cases
+    details=render_details(result)
+    assert rows[0]['non_ai_alternative'] in _read_markdown(details) and rows[0]['human_role'] in _read_markdown(details)
 
 
 def test_source_appendix_prefers_explicit_measured_scope_and_keeps_alternative_outcomes():
@@ -801,9 +816,10 @@ def test_source_appendix_prefers_explicit_measured_scope_and_keeps_alternative_o
     p=proposal(n,['correction','answer'],task_type='semantic_review')
     p['measurement']['source_action_ids']=n['map']['actions'][1]['source_action_ids']
     saved=generate_opportunities(n,a,OpportunityMock(plan(p)))
-    appendix=render_markdown(saved).split('## Приложение с источниками')[1]
+    appendix=render_details(saved)
     assert 'исправление допущенных' in appendix and 'об отсутствии опечаток' in appendix
-    assert 'action-' not in appendix and 'evidence-' not in appendix
+    assert all(sid in appendix for sid in saved['report']['initiatives'][0]['source_action_ids'])
+    assert 'action-' not in render_markdown(saved)
 
 
 def test_hours_metric_without_actual_sample_keeps_minutes_and_marked_standard_comparison():
@@ -823,61 +839,74 @@ def test_hours_metric_without_actual_sample_keeps_minutes_and_marked_standard_co
     assert 'не годовая нагрузка' in summary and row['economics']['status']=='needs_data'
 
 
-def test_docx_and_bundle_use_same_saved_report_with_cyrillic_and_complete_json():
+def test_docx_pdf_and_bundle_use_same_saved_report_with_complete_details_and_json():
     from io import BytesIO
     from zipfile import ZipFile
     from docx import Document
     from docx.oxml.ns import qn
-    from govai.report_export import render_docx, render_bundle
+    from pypdf import PdfReader
+    from govai.report_export import render_docx, render_pdf, render_bundle
     _,_,a,n=map_case(); provider=OpportunityMock(three_proposals(n))
     artifact=generate_opportunities(n,a,provider)
     before=deepcopy(artifact)
     markdown=render_markdown(artifact).encode('utf-8')
-    data=render_docx(artifact)
+    details=render_details(artifact).encode('utf-8')
+    data=render_docx(artifact); pdf=render_pdf(artifact)
     document=Document(BytesIO(data))
     text='\n'.join(p.text for p in document.paragraphs)
-    assert 'Резюме для руководителя' in text and 'Приложение с источниками' in text
-    assert 'Сверка материалов при исправлении ошибок' in text
-    assert 'исправление допущенных' in text and 'об отсутствии опечаток' in text
-    assert '\\.' not in text and '##' not in text
-    assert document.tables and len(document.tables[0].columns)==5
-    assert document.tables[0].cell(0,0).text=='№'
-    assert [row.cells[0].text for row in document.tables[0].rows[1:]]==['1','2','3']
-    assert document.tables[0].rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
+    assert 'Главное для руководителя' in text and 'Условия запуска и основания' in text
+    assert 'Приложение с источниками' not in text
+    table=document.tables[0]
+    assert len(table.columns)==4 and table.cell(0,0).text=='№ и название'
+    assert [row.cells[0].text.split('.')[0].replace('№ ','') for row in table.rows[1:]]==['1','2','3']
+    assert table.rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
     assert document.sections[0].page_width.cm==pytest.approx(21,abs=.01)
     assert document.sections[0].page_height.cm==pytest.approx(29.7,abs=.01)
-    assert not document.element.xpath('.//w:br[@w:type="page"]')
+    assert document.styles['Normal'].font.size.pt>=11
+    assert all(run.font.size.pt>=10.5 for row in table.rows for cell in row.cells for p in cell.paragraphs
+               for run in p.runs if run.font.size is not None)
     assert all(not rel.is_external for rel in document.part.rels.values())
-    with ZipFile(BytesIO(render_bundle(artifact,docx_data=data,markdown_data=markdown))) as archive:
-        assert set(archive.namelist())=={'opportunity-report.docx','opportunity-report.md','opportunities.json','README.txt'}
+    pages=PdfReader(BytesIO(pdf)).pages
+    pdf_text=' '.join(' '.join(page.extract_text() for page in pages).split())
+    assert 1<=len(pages)<=6 and 'Главное для руководителя' in pdf_text
+    assert 'Сверка материалов при исправлении ошибок' in pdf_text
+    assert all(item['title'] in pdf_text for item in artifact['report']['initiatives'])
+    assert 'исправление допущенных' in details.decode() and 'об отсутствии опечаток' in details.decode()
+    assert all(proof['quote'] in details.decode() for proof in artifact['report']['evidence'].values())
+    with ZipFile(BytesIO(render_bundle(artifact,docx_data=data,pdf_data=pdf,markdown_data=markdown,
+                                      details_data=details))) as archive:
+        assert set(archive.namelist())=={'opportunity-report.docx','opportunity-report.pdf','opportunity-report.md',
+                                        'opportunities.json','opportunity-details.txt','README.txt'}
         assert archive.testzip() is None
         assert archive.read('opportunity-report.docx')==data
+        assert archive.read('opportunity-report.pdf')==pdf
         assert archive.read('opportunity-report.md')==markdown
+        assert archive.read('opportunity-details.txt')==details
         saved=archive.read('opportunities.json')
         assert json.loads(saved)==artifact
         assert restore_opportunities(saved,n,a,'test-model')==artifact
-        assert 'предварительные' in archive.read('README.txt').decode('utf-8')
+        assert 'предварительн' in archive.read('README.txt').decode('utf-8').casefold()
         assert '2023-05-30' in archive.read('README.txt').decode('utf-8')
     assert len(provider.calls)==1 and artifact==before
 
 
-def test_docx_literal_source_markup_long_names_and_bundle_mismatch_are_safe():
+def test_literal_source_markup_stays_in_details_and_bundle_mismatch_is_rejected():
     from io import BytesIO
     from docx import Document
     from govai.report_export import render_docx, render_bundle
     _,_,a,n=simple_map()
     saved=generate_opportunities(n,a,OpportunityMock(plan(proposal(n))))
     # Presentation robustness only; source validators remain tested separately.
-    saved['report']['initiatives'][0]['title']='Очень длинное название содержательной проверки ' * 8
-    for proof in saved['report']['evidence'].values():
-        proof['quote']='Текст с `кавычками`, **звёздочками**, символом | и ссылкой [пример](https://invalid.example).'
+    long_title='Проверка сложных документов и мотивировки ответа с сопоставлением связанных материалов'
+    saved['report']['initiatives'][0]['title']=long_title
+    literal='Текст с `кавычками`, **звёздочками**, символом | и ссылкой [пример](https://invalid.example).'
+    for proof in saved['report']['evidence'].values(): proof['quote']=literal
     document=Document(BytesIO(render_docx(saved)))
-    text='\n'.join(p.text for p in document.paragraphs)
-    assert '**звёздочками**' in text and '[пример](https://invalid.example)' in text
+    assert literal in render_details(saved)
     assert not document.element.xpath('.//w:hyperlink')
-    assert document.tables[0].cell(1,0).text=='1'
-    assert 'Очень длинное название' in document.tables[0].cell(1,1).text
-    with pytest.raises(ValueError,match='does not describe'):
+    assert long_title in document.tables[0].cell(1,0).text
+    assert '…' not in document.tables[0].cell(1,0).text
+    with pytest.raises(ValueError,match='complete JSON|does not describe'):
         render_bundle(saved,json_data=b'{}')
 
 
@@ -1152,14 +1181,16 @@ def test_local_scenario_wrong_unit_preserves_hypothesis_without_numeric_effect()
     assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
 
 
-def test_compact_effect_and_assumptions_preserve_scope_and_all_distinct_values():
+def test_management_effect_and_assumptions_preserve_scope_and_all_distinct_values():
     from govai.opportunities import rebuild_opportunities
-    from govai.opportunity_report import compact_effect
     _,_,analysis,normalized=simple_map(
         ('Исполнитель ведомства проверяет комплектность документов.', 'Исполнитель ведомства готовит проект запроса.'),
         actors=('Исполнитель ведомства','Исполнитель ведомства'),participants=('agency','agency'))
     candidate=proposal(normalized,['op-0','op-1'],economic_model='labor_time')
-    candidate['measurement']['source_action_ids']=normalized['map']['actions'][0]['source_action_ids']
+    candidate['measurement'].update(
+        source_action_ids=normalized['map']['actions'][0]['source_action_ids'],
+        work='Только сверка комплектности документов исполнителем ведомства.',
+        boundary='Чтение комплекта, проверка выводов ИИ и исправление ошибок; подготовка и отправка запроса не входят.')
     original=_legacy_opportunity_artifact(normalized,analysis,[candidate])
     inputs={'pilot':_individual_completeness_scenarios()}
     editorial=_editorial_inputs(original['report']['initiatives'],['pilot'])
@@ -1170,10 +1201,15 @@ def test_compact_effect_and_assumptions_preserve_scope_and_all_distinct_values()
     before=deepcopy(saved)
     row=saved['report']['initiatives'][0]
     assert row['measurement']['partial_initiative']
-    overview=compact_effect(row)
-    assert 'Только сверка комплектности.' in overview and '133,33' in overview
+    overview=management_view(saved)
+    assert overview['initiatives'][0]['benefit']=='Только сверка комплектности.'
+    effect=overview['effects'][0]
+    assert row['measurement']['work'] in effect['boundary']
+    assert 'подготовка и отправка запроса не входят' in effect['boundary']
+    assert '133,33' in ' '.join(effect['rows'][1])
     markdown=render_markdown(saved)
-    appendix=markdown.split('## Дополнительные расчётные предпосылки',1)[1]
+    appendix=_read_markdown(render_details(saved))
+    assert 'Общие предпосылки для всех сценариев' not in markdown
     assert 'Общие предпосылки для всех сценариев' in appendix
     before_note=inputs['pilot'][0]['parameters']['before_minutes']['note'].rstrip('.')
     count_note=inputs['pilot'][0]['parameters']['case_count']['note'].rstrip('.')
@@ -1186,3 +1222,126 @@ def test_compact_effect_and_assumptions_preserve_scope_and_all_distinct_values()
         assert value+' человеко-минут на случай; Сценарное допущение' in appendix
     assert saved==before and saved['scenario_inputs']==inputs
     assert len(row['economics']['scenarios'])==3
+
+
+def _management_fixture(count, *, long_names=False, scenario=False):
+    """Synthetic layout fixture; it does not demonstrate model quality on another act."""
+    total=max(1,count)
+    lines=tuple(f'Специалист ведомства проверяет материалы дела вида {i+1} и готовит проект ответа.' for i in range(total))
+    _,_,analysis,normalized=simple_map(lines,actors=('Специалист ведомства',)*total,participants=('agency',)*total)
+    rows=[]
+    for index in range(count):
+        title=(f'Проверка материалов дела {index+1}' if not long_names else
+               f'Проверка материалов дела {index+1} и сопоставление существенных доводов с документами перед подготовкой мотивированного ответа заявителю')
+        rows.append(proposal(normalized,[f'op-{index}'],key=f'case-{index+1}',title=title,
+            economic_model='labor_time' if index==0 and scenario else 'qualitative',
+            prospect_assessment=prospect_assessment(pilot_feasibility='bounded' if index<3 else 'needs_preparation')))
+    provider=OpportunityMock(plan(*rows))
+    supplied={'case-1':_individual_completeness_scenarios()} if count and scenario else None
+    artifact=generate_opportunities(normalized,analysis,provider,scenario_inputs=supplied)
+    assert len(artifact['report']['initiatives'])==count
+    return artifact,normalized,analysis,provider
+
+
+@pytest.mark.parametrize('count,long_names,scenario',[(0,False,False),(1,True,False),(5,False,False),(8,False,True),(12,False,True),(20,True,False)])
+def test_management_exports_adapt_without_editorial_data_or_dropping_initiatives(count,long_names,scenario):
+    from io import BytesIO
+    from docx import Document
+    from pypdf import PdfReader
+    from govai.report_export import render_pdf,render_docx
+    artifact,normalized,analysis,provider=_management_fixture(count,long_names=long_names,scenario=scenario)
+    before=deepcopy(artifact)
+    view=management_view(artifact)
+    assert not artifact['editorial_inputs']
+    assert len(view['initiatives'])==count and len(view['pilots'])<=3
+    assert [row['number'] for row in view['initiatives']]==list(range(1,count+1))
+    assert [row['id'] for row in view['initiatives']]==[row['id'] for row in artifact['report']['initiatives']]
+    assert [row['category'] for row in view['initiatives']]==[row['prospect']['category'] for row in artifact['report']['initiatives']]
+    markdown=render_markdown(artifact)
+    detailed=render_details(artifact)
+    pdf=PdfReader(BytesIO(render_pdf(artifact)))
+    text=' '.join(' '.join(page.extract_text() or '' for page in pdf.pages).split())
+    assert 1<=len(pdf.pages)<=6
+    assert all(len((page.extract_text() or '').strip())>80 for page in pdf.pages)
+    assert 'Главное для руководителя' in text and 'Условия запуска и основания' in text
+    assert '\ufffd' not in text and '…' not in markdown
+    document=Document(BytesIO(render_docx(artifact)))
+    assert document.styles['Normal'].font.size.pt>=11
+    for row in view['initiatives']:
+        assert row['title'] in markdown and row['title'] in text
+        assert row['category_label'] in text
+        assert row['condition'] in _read_markdown(markdown)
+        assert row['id'] in detailed
+    if count:
+        if document.tables:
+            table=document.tables[0]
+            assert len(table.rows)==count+1
+            for row,item in zip(table.rows[1:],view['initiatives']):
+                assert item['title'] in row.cells[0].text
+                assert str(item['number']) in row.cells[0].text
+            assert all(run.font.size.pt>=10.5 for row in table.rows for cell in row.cells for paragraph in cell.paragraphs
+                       for run in paragraph.runs if run.font.size is not None)
+        else:
+            # A long catalogue may use a full-width list. All content must survive.
+            body='\n'.join(p.text for p in document.paragraphs)
+            for item in view['initiatives']:
+                assert f"№ {item['number']}. {item['title']}" in body
+                assert item['category_label'] in body
+                assert item['benefit'] in body and item['condition'] in body
+    else:
+        assert not view['pilots'] and not view['effects']
+        assert 'Контролируемый тестовый ответ' in markdown
+        assert 'Какой эффект можно получить' not in markdown and 'Какой эффект можно получить' not in text
+    for proof in artifact['report']['evidence'].values():
+        assert proof['quote'] in detailed
+    if scenario:
+        assert all(value in markdown and value in text for value in ('66,67','133,33','166,67'))
+        assert 'Иллюстративный сценарий' in markdown
+        assert 'не годовая' in markdown.casefold() or 'не годовой' in markdown.casefold()
+    else:
+        assert '66,67' not in markdown and '133,33' not in markdown and '166,67' not in markdown
+    assert artifact==before and len(provider.calls)==1
+    assert restore_opportunities(json.dumps(artifact).encode(),normalized,analysis,'test-model')==artifact
+
+
+def test_saved_executive_summary_is_rendered_from_one_common_presentation():
+    from io import BytesIO
+    from docx import Document
+    from pypdf import PdfReader
+    from govai.opportunities import rebuild_opportunities
+    from govai.report_export import render_pdf,render_docx
+    original,n,a,_=_management_fixture(1)
+    editorial=_editorial_inputs(original['report']['initiatives'],['case-1'])
+    summary='Начать с проверки документов одного вида: специалист увидит пропуски и проверит вывод по первоисточнику. Сначала сравнить помощь ИИ с действующим чек-листом.'
+    editorial['executive_summary']=summary
+    saved=rebuild_opportunities(json.dumps(original).encode(),n,a,'test-model',editorial_inputs=editorial,
+        reason='Явная редакционная проработка сохранённого результата для управленческого обсуждения, без нового запроса модели.')
+    view=management_view(saved)
+    assert view['requisites']=='Реквизиты не определены'
+    dated=deepcopy(saved)
+    dated['report']['document'].update(act_type='Приказ',number='261',
+        adoption_date='2020-09-11',revision_date='2023-05-30')
+    assert management_view(dated)['requisites']=='Приказ № 261 от 11.09.2020 · редакция 30.05.2023'
+    assert summary in json.dumps(view,ensure_ascii=False)
+    assert summary in _read_markdown(render_markdown(saved))
+    word=Document(BytesIO(render_docx(saved)))
+    assert summary in '\n'.join(p.text for p in word.paragraphs)
+    pdf=PdfReader(BytesIO(render_pdf(saved)))
+    assert summary in ' '.join(' '.join(page.extract_text() for page in pdf.pages).split())
+    assert saved['plan']==original['plan'] and saved['metrics']['requests']==0
+    assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==saved
+
+
+def test_management_effect_keeps_each_scenarios_own_comparison_basis():
+    from govai.opportunities import rebuild_opportunities
+    original,normalized,analysis,_=_management_fixture(1,scenario=True)
+    inputs=deepcopy(original['scenario_inputs'])
+    for scenario,count in zip(inputs['case-1'],('500','1000','1500')):
+        scenario['parameters']['case_count']['value']=count
+    saved=rebuild_opportunities(json.dumps(original).encode(),normalized,analysis,'test-model',
+        scenario_inputs=inputs,reason='Разные явно иллюстративные базы сравнения должны оставаться видимыми рядом с индивидуальными результатами.')
+    effect=management_view(saved)['effects'][0]
+    assert effect['headers'][-1]=='Эффект и база сравнения'
+    for row,count in zip(effect['rows'],('500','1 000','1 500')):
+        assert 'на '+count+' подходящих случаев' in row[-1]
+    assert restore_opportunities(json.dumps(saved).encode(),normalized,analysis,'test-model')==saved
