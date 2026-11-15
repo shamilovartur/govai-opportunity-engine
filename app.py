@@ -17,12 +17,70 @@ from govai.process_ui import render_processes
 from govai.document_ui import document_header
 
 
+def _localize_document_upload():
+    """Localize only this native widget; Streamlit 1.67 has no uploader locale API.
+
+    Keep its input, buttons, events and file transport intact. The constant script
+    never reads file contents or interpolates uploaded data. Test IDs plus our
+    explicit widget key are intentionally independent of generated CSS classes.
+    """
+    st.html("""
+<style>
+.st-key-document_upload [data-testid="stFileUploaderDropzone"] { background: #EAF4EF; }
+.st-key-document_upload [data-testid="stFileUploaderDropzoneInstructions"] span {
+    white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; font-size: 1rem;
+}
+</style>
+<script>
+(() => {
+  const slot = '__govaiDocumentUploadLocalization';
+  if (window[slot]) window[slot]();
+  let observer, timer, stopped = false, attempts = 0;
+  const replaceText = (element, value) => {
+    if (!element || element.textContent === value) return;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node, first = true;
+    while ((node = walker.nextNode())) {
+      node.nodeValue = first ? value : '';
+      first = false;
+    }
+  };
+  const translate = (root) => {
+    replaceText(root.querySelector('[data-testid="stFileUploaderDropzoneInstructions"]'),
+                'PDF с текстом, DOCX или TXT · до 10 МБ');
+    const input = root.querySelector('[data-testid="stFileUploaderDropzoneInput"]');
+    if (input) input.setAttribute('aria-label', 'Выберите документ');
+    for (const button of root.querySelectorAll('[data-testid="stFileUploaderDropzone"] button')) {
+      const label = button.querySelector('[data-testid="stMarkdownContainer"] p');
+      if (label && (label.textContent === 'Upload' || label.textContent === 'Загрузить')) {
+        replaceText(label, 'Загрузить');
+        button.setAttribute('aria-label', 'Загрузить документ');
+      }
+    }
+  };
+  const attach = () => {
+    if (stopped) return;
+    const root = document.querySelector('.st-key-document_upload');
+    if (!root) {
+      if (++attempts < 60) timer = setTimeout(attach, 50);
+      return;
+    }
+    translate(root);
+    observer = new MutationObserver(() => translate(root));
+    observer.observe(root, {childList: true, subtree: true, characterData: true});
+  };
+  window[slot] = () => { stopped = true; clearTimeout(timer); if (observer) observer.disconnect(); };
+  attach();
+})();
+</script>
+""", unsafe_allow_javascript=True)
+
+
 def _load_input():
     mode = st.radio('Способ загрузки', ['Загрузить файл', 'Загрузить по ссылке'], horizontal=True)
     if mode == 'Загрузить по ссылке':
-        st.caption('Прямая HTTPS-ссылка на PDF или публичную страницу с текстом документа · до 10 МБ')
         url = st.text_input('Ссылка на документ', placeholder='https://example.org/document.pdf')
-        if st.button('Загрузить по ссылке', type='primary'):
+        if st.button('Начать', type='primary'):
             # Clear the old result before every attempt, including failed retries.
             st.session_state.pop('url_document', None)
             st.session_state.pop('loaded_url', None)
@@ -38,13 +96,13 @@ def _load_input():
                 return None
         if st.session_state.get('loaded_url') == url:
             return st.session_state.get('url_document')
-        st.caption('Страница должна открываться без входа в аккаунт.')
         return None
 
     uploaded_file = st.file_uploader(
         'Выберите документ', type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=False,
-        help='PDF должен содержать текстовый слой. Распознавание сканов пока не поддерживается.',
+        key='document_upload', max_upload_size=10,
     )
+    _localize_document_upload()
     if uploaded_file is None:
         return None
     encoding = 'utf-8-sig'
@@ -82,18 +140,12 @@ def _load_input():
 
 
 def main() -> None:
-    st.set_page_config(page_title="GovAI — возможности ИИ в нормативном акте", page_icon="📄")
-    st.badge('GovAI', color='green')
+    st.set_page_config(page_title="GovAI — варианты для внедрения ИИ", page_icon="📄")
     if not st.session_state.get('process_result'):
-        st.title('Найдите возможности для применения ИИ в нормативном акте')
-        st.write('Загрузите документ. GovAI выделит описанные в нём процессы и предложит, '
-                 'где ИИ может помочь сотрудникам. В отчёте — первые кандидаты для пилота, '
-                 'ожидаемая польза и ссылки на положения документа.')
-    st.subheader('1. Загрузите нормативный акт')
-    with st.expander('Документ и загрузка', expanded=not bool(st.session_state.get('process_result'))):
-        st.caption('PDF с текстом, DOCX или TXT · до 10 МБ')
-        document = _load_input()
-        st.caption('Скан без распознанного текста пока не поддерживается.')
+        st.title('Поиск вариантов для внедрения ИИ')
+        st.write('Загрузите документ в удобном формате. Агент изучит рабочий процесс '
+                 'и предложит рекомендации по оптимизации')
+    document = _load_input()
     if document is None:
         for key in ('process_result', 'process_document', 'process_result_bytes', 'verified_analysis', 'process_origin', 'process_error'):
             st.session_state.pop(key, None)

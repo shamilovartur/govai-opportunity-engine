@@ -1,6 +1,7 @@
 """Report generation and display; imports and diagnostics stay in the technical section."""
 
 import json
+from html import escape as html_escape
 import os
 import time
 from uuid import uuid4
@@ -11,7 +12,8 @@ from govai.analysis_io import digest
 from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids,
-                                 export_opportunity_plan, restore_opportunity_plan)
+                                 export_opportunity_plan, restore_opportunity_plan,
+                                 rebuild_opportunities, SOURCE_VALIDATION_VERSION)
 from govai.opportunity_report import (management_view, render_markdown, render_details,
                                       _safe as escape_text)
 from govai.processes import ProcessError
@@ -249,37 +251,70 @@ def render_opportunities(normalized, analysis):
         _source_downloads(files, prefix='fallback')
     st.caption('Сохраните архив: он содержит отчёт и полный JSON для восстановления. '
                'Без скачанной копии результат может быть потерян после завершения сессии.')
-    report = artifact['report']
-    if not report['initiatives']:
-        st.info('Подходящих инициатив не найдено. В отчёте сохранено объяснение: '
-                'это допустимый результат, а не ошибка анализа.')
-    warning = ('Это предложения для проверки, а не полученный эффект или доказанная окупаемость. '
-               'Сценарные числа не являются измерениями ведомства.')
-    if report['normalization_status'] != 'completed':
-        warning += ' Для части операций нужно уточнить границы и участников до количественных выводов.'
-    quarantined = sum(r.get('origin') == 'integrity_validator' for r in report['rejected'])
-    if quarantined:
-        warning += (f' Инициатив с неподтверждёнными источниками отложено: {quarantined}. '
-                    'Они не включены в принятые рекомендации и числовые эффекты.')
-    st.warning(warning)
     view = files['view']
     if view is None:
         st.info('Не удалось подготовить краткое представление. Сохранённый JSON и доступные форматы можно скачать выше.')
         return
-    st.subheader('Главное для руководителя')
-    for block in view['summary_blocks']:
-        st.markdown('**' + escape_text(block['label']) + '**')
-        st.write(escape_text(block['text']))
-    st.subheader('Предлагаемые инициативы')
-    st.caption(f"Инициатив: {len(view['initiatives'])}. Номер — предварительная очередь проверки; эффекты не суммируются автоматически.")
-    for row in view['initiatives']:
-        with st.container(border=True):
+    outcome = view['outcome']
+    if outcome['state'] in ('rejected', 'partial', 'unfinished'):
+        st.warning(outcome['message'])
+        st.info(outcome['action'])
+    elif outcome['state'] == 'none':
+        st.info(outcome['message'])
+    _render_management(view)
+
+
+def _render_management(view):
+    """Render the shared report view; no classification, calculation or model call here."""
+    st.html("""<style>
+    .st-key-govai_conclusion {background:#EAF4EF;padding:1.25rem;border-radius:0.75rem;}
+    .govai-highlights {display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1rem 0;}
+    .govai-highlight {background:#EDF3F8;color:#24312D;padding:1rem;border-radius:0.65rem;}
+    .govai-highlight strong {display:block;font-size:1.65rem;line-height:1.25;margin:0.5rem 0;}
+    .govai-highlight p {margin:0.4rem 0;line-height:1.5;}
+    .govai-highlight small {display:block;line-height:1.5;}
+    .govai-flow {display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin:0.75rem 0;}
+    .govai-flow span {background:#EDF3F8;color:#24312D;padding:0.65rem;border-radius:0.4rem;}
+    @media(max-width:600px){.govai-flow {flex-direction:column;align-items:stretch;}.govai-flow b {text-align:center;transform:rotate(90deg);}}
+    </style>""")
+    with st.container(key='govai_conclusion'):
+        st.subheader(view['conclusion']['heading'])
+        st.write(escape_text(view['conclusion']['text']))
+    if view.get('input_limitation'):
+        st.caption(escape_text(view['input_limitation']))
+    if view['highlights']:
+        panels = []
+        for item in view['highlights']:
+            panels.append('<article class="govai-highlight"><small>' + html_escape(item['status']) +
+                '</small><strong>' + html_escape(item['value']) + '</strong><p>' + html_escape(item['label']) +
+                '</p><small>' + html_escape(item['basis']) + '</small><p>' + html_escape(item['note']) + '</p></article>')
+        st.html('<section class="govai-highlights" aria-label="Эффект и предпосылки">' + ''.join(panels) + '</section>')
+    for group in view['priority_groups']:
+        st.subheader(group['title'])
+        st.caption(escape_text(group['explanation']))
+        for row in group['items']:
             st.markdown('**' + escape_text(f"№ {row['number']}. {row['title']}") + '**')
-            st.caption(escape_text(row['category_label']))
             st.write(escape_text(row['benefit']))
-            st.caption('Главное условие: ' + escape_text(row['condition']))
-            if row['clauses']:
-                st.caption('Основания: ' + escape_text(row['clauses']))
+            st.caption(escape_text(row['category_label'] + '. Условие: ' + row['condition']))
+    if view['pilots']:
+        st.subheader('Как проверить первые решения')
+    for pilot in view['pilots']:
+        st.markdown('**' + escape_text(f"№ {pilot['number']}. {pilot['title']}") + '**')
+        st.write(escape_text(pilot['narrative']))
+        if pilot['flow']:
+            st.caption('Предлагаемый порядок работы')
+            flow = '<b aria-hidden="true">→</b>'.join('<span>' + html_escape(step) + '</span>' for step in pilot['flow'])
+            st.html('<div class="govai-flow" aria-label="Предлагаемый порядок работы">' + flow + '</div>')
+        for field in ('effect', 'resources', 'reason', 'check'):
+            if pilot[field]: st.write(escape_text(pilot[field]))
+        st.caption('Главное условие: ' + escape_text(pilot['condition']))
+        st.caption('Основание: ' + escape_text(pilot['clauses']))
+    with st.expander('Условия и основания', expanded=False):
+        for condition in view['conditions']: st.write(escape_text(condition))
+        st.caption(escape_text(view['requisites']))
+        for source in view['source_index']:
+            st.caption(escape_text(f"№ {source['number']} — {source['clauses']}"))
+        st.caption(escape_text(view['detail_note']))
 
 
 def render_opportunity_technical(normalized, analysis):
@@ -308,6 +343,20 @@ def render_opportunity_technical(normalized, analysis):
         except ProcessError as exc: st.error('Восстановление плана: ' + str(exc))
     artifact = reports.get(key)
     if artifact:
+        if artifact['compatibility'].get('source_validation_version') != SOURCE_VALIDATION_VERSION:
+            st.caption('Сохранённый отчёт использует прежний контракт источников. '
+                       'Можно заново проверить основную операцию и её контекст без обращения к модели.')
+            if st.button('Повторно проверить источники без API', disabled=busy):
+                try:
+                    rebuilt = rebuild_opportunities(json.dumps(artifact, ensure_ascii=False).encode(),
+                        normalized, analysis, model, provider_name,
+                        reason='Локальная повторная проверка доказательств основной операции и явно указанного контекста по обновлённому контракту; новый ответ модели не запрашивался.')
+                    reports[key] = rebuilt
+                    st.session_state.setdefault('opportunity_origins', {})[key] = 'restored_session'
+                    st.session_state.setdefault('opportunity_exports', {}).pop(key, None)
+                    st.rerun()
+                except ProcessError as exc:
+                    st.error('Повторная проверка не завершена: ' + analysis_error_message(str(exc)))
         files = _exports(key, artifact)
         _source_downloads(files, prefix='technical')
         st.caption(f"Подготовка файлов: {files['elapsed_seconds']:.2f} с. Повторное открытие использует готовые файлы.")

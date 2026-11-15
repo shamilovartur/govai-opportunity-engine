@@ -248,7 +248,11 @@ def test_review_only_map_creates_provider_and_keeps_hypothesis_without_money(mon
         assert report['initiatives'][0]['economics']['scenarios']==[]
         assert report['normalization_status']=='incomplete'
         assert any('Для части действий нужно уточнить границы операции и исполнителя' in x.value for x in app.warning)
-        assert any('Для части операций нужно уточнить границы и участников' in x.value for x in app.warning)
+        view=next(iter(app.session_state['opportunity_exports'].values()))['view']
+        assert any('границ' in text or 'участник' in text for text in view['conditions'])
+        from govai.opportunity_ui import escape_text
+        assert view['input_limitation']
+        assert any(x.value==escape_text(view['input_limitation']) for x in app.main.caption)
         assert app.session_state['process_result_bytes']==original
         app.run(); assert UIProvider.count==1
         assert all(b.proto.ignore_rerun for b in app.get('download_button'))
@@ -272,7 +276,9 @@ def test_context_only_map_has_empty_result_without_provider_or_key(monkeypatch):
         artifact=next(iter(app.session_state['opportunity_reports'].values()))
         assert artifact['metrics']['requests']==0 and not artifact['report']['initiatives']
         assert 'нет конкретных операций' in artifact['report']['explanation']
-        assert any('Подходящих инициатив не найдено' in x.value for x in app.info)
+        view=next(iter(app.session_state['opportunity_exports'].values()))['view']
+        assert view['outcome']['state']=='none'
+        assert any(view['outcome']['message']==x.value for x in app.info)
 
 
 def test_main_three_step_flow_including_empty_llm_parameters(monkeypatch):
@@ -496,7 +502,9 @@ def test_quarantined_source_is_visible_as_warning_not_as_accepted_initiative(mon
         app=load_saved_processes(AppTest.from_file(str(APP)))
         button(app,'Сформировать отчёт').click().run()
         assert not app.exception and not app.error and UIProvider.count==1
-        assert any('Инициатив с неподтверждёнными источниками отложено: 1' in w.value for w in app.warning)
+        view=next(iter(app.session_state['opportunity_exports'].values()))['view']
+        assert view['outcome']['state']=='partial' and view['outcome']['rejected_count']==1
+        assert any(view['outcome']['message']==w.value for w in app.warning)
         artifact=next(iter(app.session_state['opportunity_reports'].values()))
         assert [i['id'] for i in artifact['report']['initiatives']]==[good['key']]
         assert artifact['report']['rejected'][0]['origin']=='integrity_validator'
@@ -547,18 +555,18 @@ def test_numbered_report_restore_ui_docx_and_bundle_share_order_without_api(monk
             assert bundle.read('opportunity-report.docx')==data['Скачать отчёт (DOCX)']
             assert bundle.read('opportunity-report.md').decode()==render_markdown(saved)
         doc=Document(BytesIO(data['Скачать отчёт (DOCX)']))
-        table=doc.tables[0]
+        table=next(table for table in doc.tables if table.rows[0].cells[0].text=='Инициатива')
         assert [c.text for c in table.rows[0].cells]==[
-            '№ и название','Перспективность','Практическая польза','Главное условие']
+            'Инициатива','Практическая польза','Главное условие']
         for number,(r,i) in enumerate(zip(table.rows[1:],initiatives),1):
             assert str(number) in r.cells[0].text and i['title'] in r.cells[0].text
-        assert len(table.columns)==4
+        assert len(table.columns)==3
         assert table.rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
         assert all(r._tr.trPr.find(qn('w:cantSplit')) is not None for r in table.rows)
         assert min(run.font.size.pt for r in table.rows for c in r.cells
                    for p in c.paragraphs for run in p.runs if run.font.size)>=10.5
         assert not any(p.text=='Приложение с источниками' for p in doc.paragraphs)
-        assert any(p.text=='Условия запуска и основания' for p in doc.paragraphs)
+        assert any(p.text=='Условия и основания' for p in doc.paragraphs)
         assert any(b.label=='Скачать отчёт PDF' for b in app.get('download_button'))
         app.run()
         assert not app.exception and not app.error
@@ -627,9 +635,10 @@ def test_shared_summary_and_all_exports_are_cached_with_preparation_time(monkeyp
         assert view.call_count == pdf.call_count == word.call_count == details.call_count == markdown.call_count == bundle.call_count == 1
         cached = next(iter(app.session_state['opportunity_exports'].values()))
         assert cached['elapsed_seconds'] >= 0 and not cached['failed']
-        assert any('Начать с проверки заявления' in e.value for e in app.markdown)
-        summary = cached['view']['summary_blocks']
-        assert all(any(block['text'].split('.')[0] in e.value for e in app.markdown) for block in summary)
+        shown=' '.join(e.value for e in [*app.markdown,*app.subheader])
+        assert 'Начать с проверки заявления' in shown
+        conclusion=cached['view']['conclusion']
+        assert conclusion['heading'] in shown and ui.escape_text(conclusion['text']) in shown
         technical = next(e for e in app.expander if e.label == 'Технические данные')
         assert any('Подготовка файлов:' in e.value for e in technical.caption)
         assert not any('Подготовка файлов:' in e.value for e in app.main.caption if e not in technical.caption)
@@ -642,7 +651,8 @@ def test_known_older_session_result_revalidated_after_prompt_update_without_api(
     from govai.analysis_io import digest
     from govai.opportunities import compatibility
     a, n, _, uploader = inputs()
-    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    from test_opportunities import historical_opportunity_artifact
+    saved = historical_opportunity_artifact(n,a,plan(proposal(n,['register'])),version='2.2')
     assert saved['schema_version'] == '2.2'
     old_key = digest(saved['compatibility'])
     current_key = digest(compatibility(n, 'test-model', 'openai'))
@@ -703,9 +713,11 @@ def test_pdf_overflow_is_visible_and_download_remains_cached(monkeypatch):
 def test_known_older_plan_in_session_reassembles_without_provider(monkeypatch):
     from govai.analysis_io import digest
     a, n, _, uploader = inputs()
-    captured = []
-    generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))), on_plan=captured.append)
-    pending = captured[0]
+    from test_opportunities import historical_opportunity_artifact
+    historical=historical_opportunity_artifact(n,a,plan(proposal(n,['register'])),version='2.2')
+    pending={'kind':'govai_opportunity_plan','schema_version':'2.1',
+        'compatibility':historical['compatibility'],'plan':historical['plan'],
+        'scenario_inputs':{},'metrics':historical['metrics'],'generated_at':historical['generated_at']}
     old_key = digest(pending['compatibility'])
     monkeypatch.setenv('OPENAI_MODEL', 'test-model')
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
@@ -762,3 +774,65 @@ def test_partial_process_label_stays_visible_after_report_restore(monkeypatch):
         assert any(e.label == 'Предварительный список процессов' for e in app.expander)
         assert not any(e.label == 'Процессы готовы' for e in app.expander)
         assert any(s.value == 'Отчёт готов.' for s in app.success)
+
+
+def test_rejected_plan_does_not_publish_its_prevalidation_success_summary(monkeypatch):
+    _,n,_,uploader=inputs()
+    parsed=plan(proposal(n,['register'],evidence_refs=['foreign-evidence']))
+    parsed.explanation='Выделена одна содержательная гипотеза для первого пилота.'
+    UIProvider.prepared=parsed; UIProvider.count=0
+    monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.OpenAIOpportunityProvider',UIProvider):
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Сформировать отчёт').click().run()
+        assert not app.exception and not app.error and UIProvider.count==1
+        artifact=next(iter(app.session_state['opportunity_reports'].values()))
+        assert not artifact['report']['initiatives'] and artifact['report']['rejected']
+        assert artifact['report']['explanation']==parsed.explanation
+        view=next(iter(app.session_state['opportunity_exports'].values()))['view']
+        assert view['outcome']['state']=='rejected'
+        main_text=' '.join(x.value for x in [*app.markdown,*app.subheader,*app.info,*app.warning])
+        assert 'Предложения найдены, но не прошли проверку' in main_text
+        assert parsed.explanation not in main_text
+        assert 'Обоснованных вариантов применения ИИ не найдено' not in main_text
+        assert any(b.label=='Скачать все материалы ZIP' for b in app.get('download_button'))
+        app.run(); assert UIProvider.count==1
+
+
+def test_old_context_rejection_can_be_rechecked_locally_from_technical_section(monkeypatch):
+    from test_opportunities import historical_opportunity_artifact,presented_plan
+    from govai.opportunities import OpportunityGenerationPlan
+    a,n,_,_=inputs()
+    nodes={row['id']:row for row in n['map']['actions']}
+    refs=list(dict.fromkeys(nodes['register']['evidence_refs']+nodes['reply']['evidence_refs']))
+    current=presented_plan(proposal(n,['register'],context_action_ids=['reply'],evidence_refs=refs)).model_dump()
+    current.pop('recommendation_title')
+    for row in current['proposals']:
+        row.pop('resources'); row.pop('proposed_flow')
+    parsed=OpportunityGenerationPlan.model_validate(current)
+    saved=historical_opportunity_artifact(n,a,parsed,version='2.3')
+    original=json.dumps(saved).encode()
+    assert not saved['report']['initiatives'] and saved['report']['rejected']
+    _,_,_,uploader=inputs(original,n)
+    monkeypatch.delenv('OPENAI_API_KEY',raising=False)
+    monkeypatch.setenv('OPENAI_MODEL','test-model')
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities',side_effect=AssertionError('No API generation')), \
+         patch('govai.process_ui.extract_with_checkpoint',side_effect=AssertionError('No extraction')), \
+         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')):
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        assert next(iter(app.session_state['opportunity_reports'].values()))==saved
+        button(app,'Повторно проверить источники без API').click().run()
+        assert not app.exception and not app.error
+        rebuilt=next(iter(app.session_state['opportunity_reports'].values()))
+        assert rebuilt['schema_version']=='2.4' and rebuilt['derivation']
+        assert [i['id'] for i in rebuilt['report']['initiatives']]==[parsed.proposals[0].key]
+        assert rebuilt['report']['initiatives'][0]['source_action_ids']==nodes['register']['source_action_ids']
+        assert rebuilt['report']['initiatives'][0]['context_grounding'][0]['action_id']=='reply'
+        assert not any(b.label in ('Повторно проверить источники без API','Сформировать отчёт') for b in app.button)
+        assert any(b.label=='Скачать отчёт PDF' for b in app.get('download_button'))
+        assert json.dumps(saved).encode()==original
+        app.run(); assert next(iter(app.session_state['opportunity_reports'].values()))==rebuilt

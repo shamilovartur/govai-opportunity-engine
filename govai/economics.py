@@ -34,6 +34,7 @@ EFFECT_UNITS = {
     'applicability': 'share', 'before_elapsed_minutes': 'minutes/process',
     'after_elapsed_minutes': 'minutes/process',
 }
+RESOURCE_VERSION = 'resources-1.0'
 
 
 class Parameter(StrictModel):
@@ -279,6 +280,129 @@ def assess_effect(model, *, population='eligible_cases', metric_unit=None, block
             'required_parameters': [name for name in required if actual[name]['value'] is None],
             'reasons': ['Сценарные допущения не являются измеренными показателями ведомства.']
                 if any(s['status'] == 'illustrative' for s in results) else []}
+
+
+def labor_change(scenario):
+    """A presentation metric derived from a verified labor scenario, without changing its contract.
+
+    The percentage concerns one eligible case. It must not claim the same change
+    for every case when applicability is unknown, nor create an annual workload.
+    Keeping it outside the stored effect result preserves historical restores.
+    """
+    try:
+        if scenario.get('population') not in ('eligible_cases', 'all_cases'):
+            raise ValueError('Not a scoped labor scenario')
+        if 'eligible_saved_minutes' not in scenario['results']:
+            raise ValueError('Not a labor calculation')
+        parameters = {name: Parameter.model_validate(scenario['parameters'][name])
+                      for name in ('before_minutes', 'after_minutes')}
+        if any(p.unit != 'minutes/case' for p in parameters.values()):
+            raise ValueError('Wrong unit')
+        before = parameters['before_minutes'].value
+        after = parameters['after_minutes'].value
+        origins = list(dict.fromkeys(p.origin for p in parameters.values()))
+        value = None
+        with localcontext() as ctx:
+            ctx.prec, ctx.rounding = 60, ROUND_HALF_EVEN
+            if before is not None and after is not None and Decimal(before) != 0:
+                percent = ((Decimal(before)-Decimal(after))/Decimal(before)*100).quantize(Decimal('0.01'))
+                value = format(abs(percent) if percent == 0 else percent, 'f')
+        return {'before_minutes': before, 'after_minutes': after,
+            'saved_minutes': scenario['results']['eligible_saved_minutes']['value'],
+            'reduction_percent': value, 'percent_unit': '%',
+            'percent_formula': '(before_minutes - after_minutes) / before_minutes * 100',
+            'population': 'eligible_cases', 'origins': origins,
+            'status': 'needs_data' if value is None else 'illustrative' if 'illustrative' in origins else 'conditional_estimate',
+            'reason': ('Нельзя определить относительное изменение при неизвестном или нулевом времени до.'
+                       if value is None else 'Изменение рабочего времени на один подходящий случай; не доля всех обращений и не бюджетная экономия.')}
+    except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation) as exc:
+        raise ProcessError('Не удалось проверить исходные минуты для относительного изменения времени.') from exc
+
+
+def assess_resources(resources):
+    """Sum an explicit engineering work breakdown; never invent staff, rates or a schedule.
+
+    These are optional model assumptions, not financial facts from the NPA. Invalid
+    or incomplete ranges leave the hypothesis usable while suppressing the total.
+    The original submitted values remain in the artifact's plan; returned task
+    numbers are only those that passed these local checks.
+    """
+    source = resources if isinstance(resources, dict) else {}
+    scope = source.get('scope') if isinstance(source.get('scope'), str) else ''
+    dependencies = source.get('dependencies', [])
+    cost_basis = source.get('operating_cost_basis') if isinstance(source.get('operating_cost_basis'), str) else ''
+    issues, tasks, roles = [], [], []
+    if not scope.strip():
+        issues.append('Не определён ограниченный объём реализации; общий диапазон трудоёмкости не рассчитан.')
+    if (not isinstance(dependencies, list) or any(not isinstance(s, str) or not s.strip() for s in dependencies)):
+        dependencies = []
+        issues.append('Зависимости реализации требуют уточнения.')
+    supplied = source.get('tasks', [])
+    if not isinstance(supplied, list) or not supplied:
+        supplied = []
+        issues.append('Нет разбивки реализации на работы и роли; нужны отдельные оценки этих работ.')
+    seen = set()
+    for index, task in enumerate(supplied, 1):
+        item = task if isinstance(task, dict) else {}
+        work = item.get('work') if isinstance(item.get('work'), str) else ''
+        role = item.get('role') if isinstance(item.get('role'), str) else ''
+        basis = item.get('basis') if isinstance(item.get('basis'), str) else ''
+        reasons = []
+        lower, upper = item.get('lower_days'), item.get('upper_days')
+        origin = item.get('origin')
+        if not all(text.strip() for text in (work, role, basis)):
+            reasons.append('Нужно назвать работу, необходимую роль и основание диапазона.')
+        signature = (' '.join(work.casefold().split()), ' '.join(role.casefold().split()))
+        if signature in seen:
+            reasons.append('Одинаковая работа одной роли повторяется; её нельзя учитывать дважды.')
+        seen.add(signature)
+        if item.get('unit') != 'person_days':
+            reasons.append('Трудоёмкость реализации должна быть указана в человеко-днях, не в календарных днях.')
+        if origin not in ('illustrative', 'unknown'):
+            reasons.append('Оценка модели не подтверждает фактические ресурсы; допустимы только сценарные или неизвестные значения.')
+        elif origin == 'unknown':
+            if lower is not None or upper is not None:
+                reasons.append('Неизвестный диапазон нельзя заменять числом.')
+        else:
+            try:
+                # Reuse the existing bounded Decimal/provenance validation.
+                numbers = [Parameter(value=v, origin='illustrative', unit='person_days',
+                                     note=basis or 'Не указано основание.', evidence_refs=[]) for v in (lower, upper)]
+                if Decimal(numbers[0].value) > Decimal(numbers[1].value):
+                    raise ValueError('Reversed range')
+            except (ValueError, TypeError, InvalidOperation):
+                reasons.append('Нужен конечный неотрицательный диапазон от меньшего значения к большему.')
+        if reasons or origin == 'unknown':
+            lower = upper = None
+        tasks.append({'work': work, 'role': role, 'lower_days': lower, 'upper_days': upper,
+            'unit': 'person_days', 'origin': 'illustrative' if not reasons and origin == 'illustrative' else 'unknown',
+            'basis': basis, 'status': 'invalid' if reasons else 'needs_data' if origin == 'unknown' else 'illustrative',
+            'issues': reasons})
+        if role.strip() and role not in roles:
+            roles.append(role)
+        issues.extend(f'Работа {index}: {reason}' for reason in reasons)
+    minimum = maximum = None
+    complete = bool(tasks) and not issues and all(task['status'] == 'illustrative' for task in tasks)
+    if complete:
+        with localcontext() as ctx:
+            ctx.prec, ctx.rounding = 60, ROUND_HALF_EVEN
+            minimum = format(sum(Decimal(t['lower_days']) for t in tasks).quantize(Decimal('0.01')), 'f')
+            maximum = format(sum(Decimal(t['upper_days']) for t in tasks).quantize(Decimal('0.01')), 'f')
+    elif tasks and not issues:
+        issues.append('Оценены не все работы. Общий диапазон неизвестен; известная часть не выдана за полную стоимость реализации.')
+    return {'method_version': RESOURCE_VERSION, 'status': 'illustrative' if complete else 'needs_data',
+        'scope': scope, 'tasks': tasks, 'roles': roles, 'dependencies': dependencies,
+        'effort': {'min': minimum, 'max': maximum, 'unit': 'person_days',
+                   'origin': 'illustrative' if complete else 'unknown',
+                   'formula': 'sum(task.lower_days) .. sum(task.upper_days)'},
+        'operating_costs': {'value': None, 'origin': 'unknown', 'basis': cost_basis or
+            'Нужны объём использования, тарифы и объём сопровождения; регулярные расходы не оценены.'},
+        'implementation_cost': {'value': None, 'unit': 'RUB', 'origin': 'unknown'},
+        'calendar_days': None, 'issues': issues,
+        'limitations': ['Каждый диапазон — суммарная трудоёмкость работы её роли или группы ролей; повторно умножать его на число участников нельзя.',
+                        'Человеко-дни — трудоёмкость, не календарный срок и не подтверждение наличия сотрудников.',
+                        'Диапазон — инженерное сценарное допущение для указанного объёма; до решения о запуске нужна проверка разбивки.',
+                        'Без ставок и тарифов стоимость внедрения и использования неизвестна, а не равна нулю.']}
 
 
 def portfolio_assessment(initiatives, relationships, *, incomplete_input=False):

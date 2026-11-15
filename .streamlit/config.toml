@@ -6,9 +6,10 @@ gatherUsageStats = false
 
 [theme]
 base = "light"
-primaryColor = "#215C48"
+primaryColor = "#2F6B57"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#EEF4F1"
-textColor = "#243431"
+secondaryBackgroundColor = "#EAF4EF"
+textColor = "#24312D"
 font = "sans serif"
+baseFontSize = 16
 headingFontSizes = ["2rem", "1.6rem", "1.4rem", "1.25rem", "1.1rem", "1rem"]

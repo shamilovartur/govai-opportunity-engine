@@ -34,11 +34,26 @@ def run_with_upload(filename, data):
 def test_initial_screen():
     app = AppTest.from_file(str(APP)).run(timeout=15)
     assert not app.exception
-    assert app.title[0].value == 'Найдите возможности для применения ИИ в нормативном акте'
-    assert any('первые кандидаты для пилота' in item.value for item in app.markdown)
-    assert any('PDF с текстом, DOCX или TXT · до 10 МБ' in item.value for item in app.caption)
-    assert any('Скан без распознанного текста' in item.value for item in app.caption)
+    assert app.title[0].value == 'Поиск вариантов для внедрения ИИ'
+    assert any(item.value == 'Загрузите документ в удобном формате. Агент изучит рабочий процесс '
+               'и предложит рекомендации по оптимизации' for item in app.markdown)
+    assert app.radio[0].label == 'Способ загрузки'
+    assert not app.subheader and not app.expander
+    assert not any('Скан без распознанного текста' in item.value for item in app.caption)
+    uploader = app.get('file_uploader')[0].proto
+    assert uploader.label == 'Выберите документ' and uploader.max_upload_size_mb == 10
+    assert not uploader.help
+    assert list(uploader.type) == ['.pdf', '.docx', '.txt']
     assert not app.text_area
+
+
+def test_link_mode_uses_one_open_input_and_start_action():
+    app = AppTest.from_file(str(APP)).run(timeout=15)
+    app.radio[0].set_value('Загрузить по ссылке').run()
+    assert app.text_input[0].label == 'Ссылка на документ'
+    assert [b.label for b in app.button] == ['Начать']
+    assert not app.expander and not app.get('file_uploader')
+    assert not app.caption
 
 
 def test_txt_upload_displays_text():

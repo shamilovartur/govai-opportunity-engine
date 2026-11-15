@@ -396,3 +396,160 @@ def test_eligible_minutes_remain_known_without_all_case_applicability_but_do_not
     assert result['results']['eligible_saved_minutes']['value'] == '8.00'
     assert result['results']['saved_minutes']['value'] == '2.00'
     assert result['results']['standardized_hours']['value'] == '33.33'
+
+
+def test_relative_labor_change_is_decimal_scoped_and_keeps_scenario_provenance():
+    from govai.economics import labor_change
+    scenario = calculate_effect_scenario('labor_time', effect_case(
+        before_minutes='20', after_minutes='12', case_count='1000'))
+    original = deepcopy(scenario)
+    result = labor_change(scenario)
+    assert result['before_minutes'] == '20' and result['after_minutes'] == '12'
+    assert result['saved_minutes'] == '8.00' and result['reduction_percent'] == '40.00'
+    assert result['percent_unit'] == '%' and result['population'] == 'eligible_cases'
+    assert result['origins'] == ['illustrative'] and result['status'] == 'illustrative'
+    assert result['percent_formula'] == '(before_minutes - after_minutes) / before_minutes * 100'
+    assert scenario == original
+    assert scenario['results']['released_hours']['value'] == '133.33'
+    assert 'reduction_percent' not in scenario['results']  # historical artifact calculations are unchanged
+
+
+def test_relative_time_change_is_not_a_claim_about_all_cases_or_a_money_effect():
+    from govai.economics import labor_change
+    scenario = calculate_effect_scenario('labor_time', effect_case(before_minutes='20', after_minutes='12'),
+                                         population='all_cases')
+    assert scenario['results']['saved_minutes']['value'] is None
+    result = labor_change(scenario)
+    assert result['reduction_percent'] == '40.00' and result['population'] == 'eligible_cases'
+    assert 'не доля всех обращений' in result['reason']
+    assert 'released_hours' not in result and 'budget_savings' not in result
+
+
+@pytest.mark.parametrize('before,after,expected', [('12', '20', '-66.67'), ('0', '12', None),
+                                                 ('20', None, None), ('0.003', '0.002', '33.33')])
+def test_relative_change_keeps_negative_effect_zero_denominator_and_precision(before, after, expected):
+    from govai.economics import labor_change
+    scenario = calculate_effect_scenario('labor_time', effect_case(
+        origin='user', before_minutes=before, after_minutes=after))
+    value = labor_change(scenario)
+    assert value['reduction_percent'] == expected
+    assert value['status'] == ('needs_data' if expected is None else 'conditional_estimate')
+    assert 'illustrative' not in value['origins']
+
+
+def test_relative_change_rejects_elapsed_or_corrupted_labor_units():
+    from govai.economics import labor_change
+    elapsed = calculate_effect_scenario('elapsed_time', effect_case(before_elapsed_minutes='20', after_elapsed_minutes='12'))
+    with pytest.raises(ProcessError): labor_change(elapsed)
+    labor = calculate_effect_scenario('labor_time', effect_case(before_minutes='20', after_minutes='12'))
+    labor['parameters']['before_minutes']['unit'] = 'calendar_days'
+    with pytest.raises(ProcessError): labor_change(labor)
+
+
+def resource_case():
+    return {
+        'scope': 'Отдельный прототип сверки текстовых документов без интеграции с ведомственной системой.',
+        'tasks': [
+            {'work': 'Подготовить набор обезличенных документов и перечень проверяемых сведений.',
+             'role': 'Предметный специалист', 'lower_days': '1.5', 'upper_days': '3',
+             'unit': 'person_days', 'origin': 'illustrative',
+             'basis': 'Предполагается готовый перечень документов; требуется проверить обезличенные примеры.'},
+            {'work': 'Настроить сверку документов и подготовить интерфейс проверки найденных расхождений.',
+             'role': 'Разработчик', 'lower_days': '3.25', 'upper_days': '6.5',
+             'unit': 'person_days', 'origin': 'illustrative',
+             'basis': 'Прототип принимает текстовые файлы; подключение действующей системы в оценку не входит.'},
+        ],
+        'dependencies': ['До начала подтвердить разрешение на обработку обезличенных документов.'],
+        'operating_cost_basis': 'Расходы зависят от количества обрабатываемых документов, тарифов модели и объёма поддержки.',
+    }
+
+
+def test_resource_work_breakdown_sums_person_days_without_inventing_calendar_budget_or_staff():
+    from govai.economics import assess_resources, RESOURCE_VERSION
+    submitted = resource_case(); original = deepcopy(submitted)
+    result = assess_resources(submitted)
+    assert submitted == original
+    assert result['method_version'] == RESOURCE_VERSION
+    assert result['status'] == 'illustrative'
+    assert result['effort'] == {'min': '4.75', 'max': '9.50', 'unit': 'person_days',
+                               'origin': 'illustrative', 'formula': 'sum(task.lower_days) .. sum(task.upper_days)'}
+    assert result['roles'] == ['Предметный специалист', 'Разработчик']
+    assert result['dependencies'] == submitted['dependencies'] and result['scope'] == submitted['scope']
+    assert result['implementation_cost'] == {'value': None, 'unit': 'RUB', 'origin': 'unknown'}
+    assert result['calendar_days'] is None and result['operating_costs']['value'] is None
+    assert result['operating_costs']['origin'] == 'unknown' and result['operating_costs']['basis']
+    assert all(t['origin'] == 'illustrative' and t['status'] == 'illustrative' for t in result['tasks'])
+    assert not result['issues']
+    assert any('не календарный срок' in text for text in result['limitations'])
+
+
+def test_unknown_work_range_does_not_turn_known_subset_into_full_implementation_estimate():
+    from govai.economics import assess_resources
+    submitted = resource_case()
+    submitted['tasks'][1].update(lower_days=None, upper_days=None, origin='unknown')
+    result = assess_resources(submitted)
+    assert result['effort']['min'] is None and result['effort']['max'] is None
+    assert result['status'] == 'needs_data'
+    assert result['tasks'][0]['lower_days'] == '1.5'  # the known assumption is retained
+    assert result['tasks'][1]['lower_days'] is None
+    assert any('не выдана за полную' in text for text in result['issues'])
+    assert result['implementation_cost']['value'] is None
+
+
+@pytest.mark.parametrize('fault', ['negative', 'infinite', 'reversed', 'unit', 'unknown_number',
+                                  'false_factual', 'missing_basis', 'missing_role', 'missing_scope'])
+def test_bad_optional_resource_assumptions_suppress_total_instead_of_losing_hypothesis(fault):
+    from govai.economics import assess_resources
+    submitted = resource_case(); task = submitted['tasks'][0]
+    if fault == 'negative': task['lower_days'] = '-1'
+    elif fault == 'infinite': task['upper_days'] = 'Infinity'
+    elif fault == 'reversed': task['lower_days'] = '100'
+    elif fault == 'unit': task['unit'] = 'calendar_days'
+    elif fault == 'unknown_number': task['origin'] = 'unknown'
+    elif fault == 'false_factual': task['origin'] = 'document'
+    elif fault == 'missing_basis': task['basis'] = ' '
+    elif fault == 'missing_role': task['role'] = ''
+    else: submitted['scope'] = ''
+    before = deepcopy(submitted)
+    result = assess_resources(submitted)
+    assert result['status'] == 'needs_data' and result['issues']
+    assert result['effort']['min'] is None and result['effort']['max'] is None
+    assert result['implementation_cost']['value'] is None and result['operating_costs']['value'] is None
+    assert submitted == before
+    assert len(result['tasks']) == 2
+    if fault != 'missing_scope':
+        assert result['tasks'][0]['lower_days'] is None and result['tasks'][0]['status'] == 'invalid'
+
+
+def test_repeated_same_work_and_role_are_not_counted_twice():
+    from govai.economics import assess_resources
+    submitted = resource_case()
+    repeated = deepcopy(submitted['tasks'][0]); repeated['work'] = repeated['work'].upper()
+    submitted['tasks'].append(repeated)
+    result = assess_resources(submitted)
+    assert result['effort']['min'] is None and result['effort']['max'] is None
+    assert any('учитывать дважды' in text for text in result['issues'])
+    # Two distinct tasks of the same role are legitimate work, not a duplicate.
+    submitted = resource_case(); submitted['tasks'][1]['role'] = submitted['tasks'][0]['role']
+    result = assess_resources(submitted)
+    assert result['effort']['min'] == '4.75' and len(result['roles']) == 1
+
+
+@pytest.mark.parametrize('submitted', [None, {}, {'scope': 'Проверка ограниченного прототипа', 'tasks': []}])
+def test_missing_resource_estimates_are_unknown_not_zero(submitted):
+    from govai.economics import assess_resources
+    result = assess_resources(submitted)
+    assert result['status'] == 'needs_data'
+    assert result['effort']['min'] is None and result['effort']['max'] is None
+    assert result['calendar_days'] is None and result['implementation_cost']['value'] is None
+    assert result['operating_costs']['value'] is None and result['operating_costs']['basis']
+
+
+def test_resource_task_range_is_total_for_its_role_group_not_per_person():
+    from govai.economics import assess_resources
+    submitted = resource_case()
+    submitted['tasks'][0]['role'] = 'Два предметных эксперта и методист'
+    result = assess_resources(submitted)
+    assert result['effort']['min'] == '4.75' and result['effort']['max'] == '9.50'
+    assert result['tasks'][0]['lower_days'] == '1.5'
+    assert any('умножать его на число участников нельзя' in text for text in result['limitations'])

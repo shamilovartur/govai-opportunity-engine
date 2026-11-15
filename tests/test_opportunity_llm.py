@@ -31,10 +31,14 @@ def test_opportunity_schema_uses_shared_transport_and_its_own_prompt():
         assert p.last_call_elapsed_seconds is not None and p.last_call_elapsed_seconds>=0
         assert OpenAIProvider.prompt_version=='1.0' and OpenAINormalizer.prompt_version=='normalization-1.0'
         assert 'исходный акт' in body['instructions']
-        assert r['schema_version']=='2.3' and r['plan']['executive_summary']==ready.executive_summary
+        assert 'обычно 2–3' in body['instructions'] and '3–4 коротких работ' in body['instructions']
+        assert 'не для каждой инициативы' in body['instructions']
+        assert r['schema_version']=='2.4' and r['plan']['executive_summary']==ready.executive_summary
         schema=body['text']['format']['schema']
         assert 'executive_summary' in schema['required']
-        assert 'presentation' in schema['$defs']['PresentedProposal']['required']
+        assert 'recommendation_title' in schema['required']
+        assert 'presentation' in schema['$defs']['ResourcedProposal']['required']
+        assert {'resources','proposed_flow'}<=set(schema['$defs']['ResourcedProposal']['required'])
         for definition in [schema,*schema['$defs'].values()]:
             assert definition['additionalProperties'] is False
             assert set(definition['required'])==set(definition['properties'])
@@ -47,8 +51,8 @@ def test_opportunity_schema_uses_shared_transport_and_its_own_prompt():
 
 
 def test_current_strict_schema_has_required_nullable_fields_and_resolvable_references():
-    from govai.opportunities import OpportunityGenerationPlan
-    schema=OpportunityGenerationPlan.model_json_schema()
+    from govai.opportunities import OperationalOpportunityPlan
+    schema=OperationalOpportunityPlan.model_json_schema()
     assert schema['type']=='object' and 'anyOf' not in schema
     def visit(value):
         if isinstance(value,dict):
@@ -64,10 +68,31 @@ def test_current_strict_schema_has_required_nullable_fields_and_resolvable_refer
             for child in value:visit(child)
     visit(schema)
     for definition,field in [('Measurement','secondary'),('Measurement','quality_protocol'),
-                             ('PresentedProposal','incremental_value'),('TimeParameter','value')]:
+                             ('ResourcedProposal','incremental_value'),('TimeParameter','value'),
+                             ('ResourceTask','lower_days'),('ResourceTask','upper_days')]:
         parent=schema['$defs'][definition]
         assert field in parent['required']
         assert {'type':'null'} in parent['properties'][field]['anyOf']
+
+
+def test_current_wire_schema_only_removes_redundant_annotations_not_data_or_constraints():
+    from pydantic import BaseModel
+    from govai.opportunities import OperationalOpportunityPlan
+    original=BaseModel.model_json_schema.__func__(OperationalOpportunityPlan)
+    compact=OperationalOpportunityPlan.model_json_schema()
+    def equivalent(old,new):
+        if isinstance(old,dict):
+            ignored={'title'} if isinstance(old.get('title'),str) else set()
+            assert set(new)==set(old)-ignored
+            for key in new:equivalent(old[key],new[key])
+        elif isinstance(old,list):
+            assert len(old)==len(new)
+            for left,right in zip(old,new):equivalent(left,right)
+        else:assert old==new
+    equivalent(original,compact)
+    assert 'title' in compact['$defs']['ResourcedProposal']['properties']
+    assert 'title' in compact['$defs']['ResourcedProposal']['required']
+    assert len(json.dumps(compact))<len(json.dumps(original))
 
 
 def test_current_adapter_does_not_accept_a_legacy_response_missing_compact_fields():
