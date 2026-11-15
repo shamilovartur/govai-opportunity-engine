@@ -11,7 +11,7 @@ from pypdf import PdfReader
 
 from govai.opportunity_report import management_view, render_markdown, render_details, report_outcome
 from govai.report_export import render_pdf, render_docx, render_bundle, pdf_layout_status
-from test_opportunities import _management_fixture
+from test_opportunities import _management_fixture, _editorial_inputs, _service_map_input
 
 
 def _pdf_text(data):
@@ -19,6 +19,65 @@ def _pdf_text(data):
     lines = [line for page in PdfReader(BytesIO(data)).pages for line in page.extract_text().splitlines()
              if line.strip() != 'GovAI · Предварительные рекомендации' and not re.fullmatch(r'Страница \d+', line.strip())]
     return ' '.join(' '.join(lines).split())
+
+
+def test_service_overview_is_shared_by_documents_and_keeps_exact_sources_in_details():
+    from govai.opportunities import rebuild_opportunities, restore_opportunities
+    original,normalized,analysis,_=_management_fixture(1)
+    editorial=_editorial_inputs(original['report']['initiatives'],['case-1'])
+    editorial['ordering_basis']='Первым проверить ограниченный участок: для него доступны контрольные примеры, а интеграция пока не нужна.'
+    editorial['service_map']=_service_map_input(normalized)
+    artifact=rebuild_opportunities(json.dumps(original).encode(),normalized,analysis,'test-model',
+        editorial_inputs=editorial,reason='Проверенный обзор услуги и основание редакционной очередности без нового запроса.')
+    before=deepcopy(artifact)
+    view=management_view(artifact)
+    assert editorial['ordering_basis'] in view['ordering_note']
+    assert 'сохранён порядок' not in view['ordering_note']
+    stage=view['service_map']['stages'][0]
+    pdf=render_pdf(artifact); docx=render_docx(artifact)
+    texts=[render_markdown(artifact).replace('\\.','.'),_pdf_text(pdf),
+           ' '.join(node.text or '' for node in Document(BytesIO(docx)).element.iter() if node.tag.endswith('}t'))]
+    for text in texts:
+        assert 'Как проходит услуга' in text
+        assert all(stage[key] in text for key in ('stage','participant','result','clauses'))
+        assert editorial['ordering_basis'] in text
+    details=render_details(artifact)
+    assert 'это не новый ответ модели' in details
+    for proof in artifact['report']['presentation']['service_map']['evidence'].values():
+        assert proof['quote'] in details
+    with ZipFile(BytesIO(render_bundle(artifact,pdf_data=pdf,docx_data=docx))) as archive:
+        data=archive.read('opportunities.json')
+        assert restore_opportunities(data,normalized,analysis,'test-model')==artifact
+        assert archive.read('opportunity-report.pdf')==pdf
+    assert artifact==before and not original['editorial_inputs']
+
+
+def test_incomplete_grouping_does_not_claim_that_source_text_is_incomplete():
+    artifact,_,_,_=_management_fixture(1)
+    artifact['report']['normalization_status']='incomplete'
+    view=management_view(artifact)
+    assert 'разграничить часть действий и участников' in view['input_limitation']
+    assert 'Числовые оценки допустимы только для отдельно определённой работы и её участника' in view['input_limitation']
+    assert 'охват' not in view['input_limitation'] and 'полнот' not in view['input_limitation']
+    # Source completeness is stated separately; it cannot be inferred from grouping.
+    assert view['scope']
+
+
+def test_full_legal_title_is_preserved_in_appendix_with_requisites_in_main_report():
+    artifact,_,_,_=_management_fixture(1)
+    title='Об утверждении порядка проверки поступивших материалов и подготовки проектов ответов заявителям'
+    artifact['report']['document'].update(title=title,act_type='Приказ',number='17',
+        adoption_date='2025-01-20',revision_date='2025-02-01')
+    view=management_view(artifact)
+    assert title in render_details(artifact)
+    assert '2025-01-20' in render_details(artifact)
+    texts=[render_markdown(artifact).replace('\\.','.'),_pdf_text(render_pdf(artifact)),
+           ' '.join(node.text or '' for node in Document(BytesIO(render_docx(artifact))).element.iter() if node.tag.endswith('}t'))]
+    for text in texts:
+        assert title not in text
+        assert view['requisites'] in text
+        assert 'opportunity-details.txt' in text
+    assert artifact['report']['document']['title']==title
 
 
 def test_full_pdf_survives_layout_overflow_without_losing_initiatives():

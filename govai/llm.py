@@ -72,8 +72,10 @@ class OpenAIProvider:
         except (OSError, ValueError) as exc:
             raise ProcessError("Не удалось настроить защищённое соединение OpenAI. "
                                "Проверьте сертификаты и прокси сервера.") from exc
+        # A transport failure can arrive after a paid request was accepted.
+        # Keep retries explicit in the application, using saved stage results.
         self.client = OpenAI(api_key=api_key, base_url='https://api.openai.com/v1',
-                             http_client=http_client, timeout=90, max_retries=1)
+                             http_client=http_client, timeout=90, max_retries=0)
 
     def close(self):
         self.client.close()

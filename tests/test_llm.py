@@ -92,6 +92,34 @@ def test_network_errors(error):
         adapter.close()
 
 
+@pytest.mark.parametrize('failure', [429, 500, 'timeout'])
+def test_actual_provider_constructor_does_not_retry_paid_extraction(monkeypatch, failure):
+    """Use the real SDK configuration, without the test helper's retry override."""
+    import govai.llm as llm
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if failure == 'timeout':
+            raise httpx.ReadTimeout('transport timeout', request=request)
+        return httpx.Response(failure, json={'error': {'message': 'test failure', 'type': 'test'}})
+
+    def configured_client(**kwargs):
+        assert kwargs['max_retries'] == 0
+        kwargs['http_client'].close()
+        kwargs['http_client'] = httpx.Client(transport=httpx.MockTransport(handler))
+        return OpenAI(**kwargs)
+
+    monkeypatch.setattr(llm, 'OpenAI', configured_client)
+    adapter = llm.OpenAIProvider('unit-test-placeholder', 'test-model')
+    try:
+        with pytest.raises(ProcessError):
+            adapter.extract({'core':'Проверенный тестовый текст.'})
+        assert len(calls) == 1
+    finally:
+        adapter.close()
+
+
 def test_missing_key_model_and_secret_configuration(monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('OPENAI_MODEL', raising=False)

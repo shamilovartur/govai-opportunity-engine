@@ -97,6 +97,28 @@ def test_saved_report_restores_without_key_or_generation(monkeypatch):
         app.run(); assert not app.exception
 
 
+def test_saved_service_overview_is_visible_without_new_generation(monkeypatch):
+    from govai.opportunities import rebuild_opportunities
+    from govai.opportunity_ui import escape_text
+    from test_opportunities import _service_map_input
+    a,n,_,_=inputs()
+    source=generate_opportunities(n,a,OpportunityMock(plan(proposal(n,['register']))))
+    service=_service_map_input(n)
+    saved=rebuild_opportunities(json.dumps(source).encode(),n,a,'test-model',
+        editorial_inputs={'service_map':service},reason='Контролируемая проверка отображения редакционной карты без новой генерации.')
+    _,_,_,uploader=inputs(json.dumps(saved).encode(),n)
+    monkeypatch.delenv('OPENAI_API_KEY',raising=False); monkeypatch.delenv('OPENAI_MODEL',raising=False)
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities',side_effect=AssertionError('No generation')):
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        assert any(item.value=='Как проходит услуга' for item in app.main.subheader)
+        assert any(service['stages'][0]['stage'] in item.value for item in app.main.markdown)
+        assert any(escape_text(service['stages'][0]['result']) in item.value for item in app.main.markdown)
+        app.run(); assert not app.exception
+
+
 def test_downloaded_json_restores_in_new_session_without_any_generation(monkeypatch):
     _,n,_,uploader=inputs(); UIProvider.prepared=plan(proposal(n,['register'])); UIProvider.count=0
     monkeypatch.setenv('OPENAI_API_KEY','test-placeholder'); monkeypatch.setenv('OPENAI_MODEL','test-model')

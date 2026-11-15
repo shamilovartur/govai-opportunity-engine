@@ -591,10 +591,6 @@ def management_view(artifact):
             conclusion = accepted_summary
             if conclusion.startswith(heading + '.'):
                 conclusion = conclusion[len(heading)+1:].lstrip()
-            if presentation.get('origin') == 'editorial' and first.get('presentation', {}).get('business_summary'):
-                action = _first_sentence(first['presentation']['business_summary'])
-                if action not in conclusion:
-                    conclusion = action + ' ' + conclusion
         else:
             p = first.get('presentation') or {}
             conclusion = business_text(p.get('business_summary') or first['ai_role']) + ' '
@@ -642,7 +638,8 @@ def management_view(artifact):
     ] if initiatives else []
     input_limitation = None
     if report.get('normalization_status') != 'completed':
-        input_limitation = 'В исходном перечне ещё нужно разграничить часть действий и участников; полный охват документа не подтверждён.'
+        input_limitation = ('В исходном перечне ещё нужно разграничить часть действий и участников. '
+                            'Числовые оценки допустимы только для отдельно определённой работы и её участника.')
         if initiatives:
             input_limitation += ' Рекомендации относятся только к подтверждённым операциям.'
         conditions.append(input_limitation)
@@ -656,15 +653,27 @@ def management_view(artifact):
     if not scope:
         scope = ('Рассмотрен загруженный фрагмент документа.' if details.get('is_fragment') else
                  'Область анализа — загруженный текст; полнота нормативного акта отдельно не подтверждена.')
+    service_map = presentation.get('service_map')
+    service_view = None
+    if service_map:
+        service_view = {'scope': business_text(service_map['scope']), 'stages': [
+            {**{key: business_text(stage[key]) for key in ('stage', 'participant', 'result')},
+             'clauses': ('пп. ' + ', '.join(stage['clause_numbers']) if stage['clause_numbers']
+                         else 'См. подтверждающий фрагмент в подробных материалах.')}
+            for stage in service_map['stages']]}
+    ordering_note = ('Номер обозначает условную очередь проработки. ' + business_text(presentation['ordering_basis'])
+                     if presentation.get('origin') == 'editorial' and presentation.get('ordering_basis') else
+                     'Номер обозначает условную очередь проработки. Внутри группы сохранён порядок; сопоставимых данных о пользе и затратах для объективного ранжирования может не быть.')
     return {'title': heading, 'outcome': outcome, 'conclusion': {'heading': heading, 'text': conclusion},
             'input_limitation': input_limitation,
+            'service_map': service_view,
             'highlights': highlights, 'initiatives': rows, 'priority_groups': _priority_groups(rows, initiatives, outcome),
             'pilots': pilots, 'effects': numeric,
             'effect_note': ('Остальные эффекты проверить по указанным показателям и экспертным примерам; процентов улучшения без наблюдений не задаём.' if numeric else
                             'Числовой эффект пока не обоснован. Получить его поможет сравнение обычного способа и работы с ИИ на одних примерах, включая проверку и исправления человеком.'),
             'conditions': conditions, 'source_index': [{'number': row['number'], 'clauses': row['clauses']} for row in rows],
             'requisites': requisites, 'full_title': business_text(details.get('title') or ''), 'scope': scope,
-            'ordering_note': 'Номер обозначает условную очередь проработки. Внутри группы сохранён порядок; сопоставимых данных о пользе и затратах для объективного ранжирования может не быть.',
+            'ordering_note': ordering_note,
             'detail_note': 'Полные цитаты, цепочки источников, расчётные предпосылки и протоколы проверки — в opportunity-details.txt и полном opportunities.json внутри ZIP.'}
 
 
@@ -677,6 +686,13 @@ def render_markdown(artifact, *, view=None):
     for highlight in v['highlights']:
         lines += ['**' + _safe(highlight['value'] + ' ' + highlight['label']) + '** — ' +
                   _safe(highlight['basis'] + '. ' + highlight['status'] + '; № ' + str(highlight['number']) + '. ' + highlight['note']), '']
+    if v.get('service_map'):
+        lines += ['## Как проходит услуга', '', _safe(v['service_map']['scope']), '',
+                  '| Этап | Участник | Результат |', '| --- | --- | --- |']
+        for stage in v['service_map']['stages']:
+            lines += ['| ' + ' | '.join(_safe(value) for value in
+                      (stage['stage'] + ' · ' + stage['clauses'], stage['participant'], stage['result'])) + ' |']
+        lines += ['']
     for group in v['priority_groups']:
         lines += ['## ' + _safe(group['title']), '', _safe(group['explanation']), '',
                   '| № и инициатива | Ожидаемая польза | Условие |', '| --- | --- | --- |']
@@ -707,8 +723,6 @@ def render_markdown(artifact, *, view=None):
     lines += ['- ' + _safe(condition) for condition in v['conditions']]
     lines += ['', '## Основания', '', _safe(v['requisites']), '', _safe(v['scope']), '']
     lines += ['- № ' + str(source['number']) + ' → ' + _safe(source['clauses']) for source in v['source_index']]
-    if v['full_title']:
-        lines += ['', _safe(v['full_title'])]
     lines += ['', _safe(v['detail_note'])]
     return '\n'.join(lines)
 
@@ -718,6 +732,10 @@ def render_details(artifact):
     report = _report(artifact)
     lines = ['# Подробные материалы к управленческому отчёту', '',
              'Этот файл дополняет краткий отчёт. Он не заменяет полноценный opportunities.json для восстановления.', '',
+             '## Анализируемый документ', '',
+             _safe(report['document'].get('title') or 'Название в исходных данных не определено.'), '',
+             _safe(' · '.join(str(report['document'][key]) for key in
+                             ('act_type', 'number', 'adoption_date', 'revision_date') if report['document'].get(key))), '',
              'Расчёты выполняются Decimal. Результаты округляются до сотых по правилу ROUND_HALF_EVEN; исходные числовые параметры сохранены в полном JSON.', '',
              '## Инициативы, условия и протоколы', '']
     for initiative in report['initiatives']:
@@ -783,8 +801,18 @@ def render_details(artifact):
                   _safe(str(initiative['economics'].get('reasons', []))),
                   _safe(str(measurement.get('validation_issues', []))),
                   _safe(str(prospect.get('assessment_issues', []))), '']
+    service_map = report.get('presentation', {}).get('service_map')
+    if service_map:
+        lines += ['## Основания краткой карты услуги', '',
+                  'Карта подготовлена при аналитической проверке исходного текста; это не новый ответ модели.', '',
+                  _safe(service_map['scope']), '']
+        for stage in service_map['stages']:
+            lines += ['- ' + _safe(stage['stage'] + ': ' + stage['participant'] + ' → ' + stage['result']) +
+                      ' — ' + _safe(', '.join(stage['evidence_refs']))]
+        lines += ['']
     lines += ['## Полные подтверждающие фрагменты', '']
-    for reference, proof in report['evidence'].items():
+    proofs = {**report['evidence'], **(service_map['evidence'] if service_map else {})}
+    for reference, proof in proofs.items():
         lines += ['### ' + _safe(reference), '',
                   'Пункт ' + _safe(proof.get('clause_number') or 'не определён') +
                   (f"; страница PDF {proof['page_number']}" if proof.get('page_number') else ''), '',

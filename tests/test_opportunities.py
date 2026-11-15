@@ -1128,6 +1128,65 @@ def _editorial_inputs(initiatives, order):
             for row in initiatives]}
 
 
+def _service_map_input(normalized):
+    """Explicit analyst wording over verified fixture quotes; never a model result."""
+    return {'version':'service-map-1','origin':'analyst_source_review',
+        'scope':'Краткий обзор подтверждённых операций; не полный перечень всех действий.',
+        'stages':[{'stage':'Проверить материалы и подготовить проект',
+            'participant':'Специалист ведомства', 'result':'Проверенные материалы и проект ответа.',
+            'evidence_refs':list(normalized['map']['evidence'])}]}
+
+
+def test_editorial_service_map_restores_without_api_or_changes_to_economic_scope(monkeypatch):
+    from govai.opportunities import rebuild_opportunities
+    _,_,analysis,normalized=simple_map(
+        ('Специалист ведомства проверяет материалы дела и готовит проект ответа.',
+         'Специалист ведомства регистрирует результат рассмотрения.'),
+        actors=('Специалист ведомства',)*2,participants=('agency',)*2)
+    original=generate_opportunities(normalized,analysis,OpportunityMock(presented_plan(proposal(normalized,['op-0']))))
+    encoded=json.dumps(original).encode(); before=deepcopy([original,normalized])
+    def forbidden(*args,**kwargs):raise AssertionError('Local review must not call a provider')
+    monkeypatch.setattr(OpportunityMock,'opportunities',forbidden)
+    service=_service_map_input(normalized)
+    derived=rebuild_opportunities(encoded,normalized,analysis,'test-model',
+        editorial_inputs={'service_map':service},reason='Добавлен проверенный обзор услуги с сохранёнными цитатами; расчёты и план не изменены.')
+    assert derived['metrics']['requests']==0 and derived['plan']==original['plan']
+    assert derived['report']['initiatives']==original['report']['initiatives']
+    assert derived['report']['evidence']==original['report']['evidence']
+    assert derived['report']['presentation']['executive_summary']==original['report']['presentation']['executive_summary']
+    checked=derived['report']['presentation']['service_map']
+    assert checked['origin']=='analyst_source_review'
+    assert checked['evidence']==normalized['map']['evidence']
+    assert set(checked['evidence'])-set(derived['report']['evidence'])  # context does not enlarge a measurement
+    assert restore_opportunities(json.dumps(derived).encode(),normalized,analysis,'test-model')==derived
+    assert restore_opportunities(encoded,normalized,analysis,'test-model')==original
+    assert 'service_map' not in original['report']['presentation'] and [original,normalized]==before
+    for field in ('editorial_inputs','report'):
+        damaged=deepcopy(derived)
+        target=(damaged[field] if field=='editorial_inputs' else damaged[field]['presentation'])
+        target['service_map']['stages'][0]['evidence_refs']=['unknown']
+        with pytest.raises(ProcessError):restore_opportunities(json.dumps(damaged).encode(),normalized,analysis,'test-model')
+
+
+@pytest.mark.parametrize('fault',['unknown','duplicate','unproven_quote','empty','version','origin','corrupt_evidence'])
+def test_editorial_service_map_rejects_invalid_or_foreign_evidence(fault):
+    from govai.opportunities import rebuild_opportunities
+    original,normalized,analysis,_=_management_fixture(1)
+    service=_service_map_input(normalized)
+    if fault=='unknown':service['stages'][0]['evidence_refs']=['unrelated-source']
+    elif fault=='duplicate':service['stages'][0]['evidence_refs']*=2
+    elif fault=='unproven_quote':service['stages'][0]['quote']='Произвольное чужое утверждение.'
+    elif fault=='empty':service['stages']=[]
+    elif fault=='version':service['version']='service-map-99'
+    elif fault=='origin':service['origin']='model'
+    else:
+        normalized=deepcopy(normalized)
+        normalized['map']['evidence'][service['stages'][0]['evidence_refs'][0]]['quote']='Неподтверждённый текст.'
+    with pytest.raises(ProcessError):
+        rebuild_opportunities(json.dumps(original).encode(),normalized,analysis,'test-model',
+            editorial_inputs={'service_map':service},reason='Проверка отказа при недостоверном источнике или повреждённом формате карты услуги.')
+
+
 def _individual_completeness_scenarios():
     """Explicit test premises, supplied locally, never attributed to a model."""
     return [{'name':name,'parameters':{

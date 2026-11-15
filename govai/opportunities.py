@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -842,6 +843,45 @@ def _check_plan_version(plan, artifact_version, plan_contract_version=None):
         raise ProcessError('Версия плана не соответствует версии отчёта; подмена версии не допускается.')
 
 
+def _editorial_service_map(value, normalized, analysis):
+    """Bind a reviewed service overview to existing proofs, never to financial scope.
+
+    Wording remains an attributed analyst interpretation. Exact citations and
+    coordinates come only from the already validated map of this document.
+    """
+    if (not isinstance(value, dict) or set(value) != {'version', 'origin', 'scope', 'stages'}
+            or value.get('version') != 'service-map-1'
+            or value.get('origin') != 'analyst_source_review'):
+        raise ProcessError('Карта услуги должна иметь версию service-map-1 и происхождение аналитической проверки.')
+    scope = value['scope']
+    stages = value['stages']
+    if (not isinstance(scope, str) or not scope.strip() or len(scope) > 400
+            or not isinstance(stages, list) or not 1 <= len(stages) <= 30):
+        raise ProcessError('Нужны границы краткой карты услуги и от 1 до 30 этапов.')
+    registry = normalized['map']['evidence']
+    result, proofs = [], {}
+    for row in stages:
+        if not isinstance(row, dict) or set(row) != {'stage', 'participant', 'result', 'evidence_refs'}:
+            raise ProcessError('Этап карты услуги должен содержать действие, участника, результат и ссылки.')
+        for field, limit in (('stage', 180), ('participant', 300), ('result', 400)):
+            if not isinstance(row[field], str) or not row[field].strip() or len(row[field]) > limit:
+                raise ProcessError('Описание этапа карты услуги пустое или слишком длинное.')
+        refs = row['evidence_refs']
+        if (not isinstance(refs, list) or not refs or not all(isinstance(ref, str) for ref in refs)
+                or len(set(refs)) != len(refs) or set(refs) - registry.keys()):
+            raise ProcessError('Карта услуги содержит неизвестные или повторяющиеся ссылки на источники.')
+        for ref in refs:
+            if registry[ref] != analysis.evidence.get(ref):
+                raise ProcessError('Доказательство карты услуги не соответствует проверенному исходному анализу.')
+            proofs[ref] = deepcopy(registry[ref])
+        result.append({**{key: row[key].strip() for key in ('stage', 'participant', 'result')},
+                       'evidence_refs': list(refs),
+                       'clause_numbers': list(dict.fromkeys(registry[ref]['clause_number'] for ref in refs
+                                                           if registry[ref].get('clause_number')))})
+    return {'version': value['version'], 'origin': value['origin'], 'scope': scope.strip(),
+            'stages': result, 'evidence': proofs}
+
+
 def _numbered_report(normalized, analysis, plan, inputs, settings, editorial=None,
                      *, artifact_version=ARTIFACT_SCHEMA_VERSION, resource_inputs=None):
     """Use one existing assembler/numberer, then expose current provider wording.
@@ -850,8 +890,19 @@ def _numbered_report(normalized, analysis, plan, inputs, settings, editorial=Non
     A summary mentioning rejected proposals must not become the recommendation.
     """
     current = artifact_version == ARTIFACT_SCHEMA_VERSION
+    # This optional presentation is not part of the model plan. Removing only
+    # its key here leaves historical artifacts without it byte-for-byte stable.
+    service_map = None
+    numbering = editorial
+    if isinstance(editorial, dict) and 'service_map' in editorial:
+        if not current:
+            raise ProcessError('Редакционная карта услуги поддерживается результатом 2.4; используйте локальную пересборку.')
+        service_map = _editorial_service_map(editorial['service_map'], normalized, analysis)
+        numbering = {key: value for key, value in editorial.items() if key != 'service_map'}
     result = number_initiatives(assemble_report(normalized, analysis, plan, inputs, settings,
-        context_evidence=current), editorial)
+        context_evidence=current), numbering)
+    if service_map is not None:
+        result['presentation']['service_map'] = service_map
     if current:
         from govai.economics import assess_resources
         resources = resource_inputs or {}
@@ -863,7 +914,7 @@ def _numbered_report(normalized, analysis, plan, inputs, settings, editorial=Non
             row['resources'] = assess_resources(original_resources)
             row['resources']['input_origin'] = ('local_engineering' if local else
                 'model_assumption' if original_resources is not None else 'not_provided')
-    if isinstance(plan, OpportunityGenerationPlan) and not editorial:
+    if isinstance(plan, OpportunityGenerationPlan) and not numbering:
         for row in result['initiatives']:
             row['presentation']['origin'] = 'model'
         result['presentation'].update(origin='model', ordering_origin='stable',

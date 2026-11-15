@@ -16,7 +16,7 @@ from lxml import etree
 
 from govai.opportunity_report import management_view, render_markdown, render_details
 
-EXPORT_VERSION = 'management-3'
+EXPORT_VERSION = 'management-4'
 _FONT_DIR = Path(__file__).with_name('fonts')
 _FONT_NAME = 'Liberation Sans'
 _UNSET = object()
@@ -67,6 +67,13 @@ def _blocks(view):
         yield ('notice', {'text': outcome['message'] + ' ' + outcome['action'], 'fill': 'sand'})
     if view.get('highlights'):
         yield ('highlights', view['highlights'])
+    if view.get('service_map'):
+        yield ('heading', 'Как проходит услуга')
+        yield ('paragraph', view['service_map']['scope'])
+        yield ('table', {'headers': ['Этап', 'Участник', 'Результат'],
+                        'rows': [[stage['stage'] + '\n' + stage['clauses'], stage['participant'], stage['result']]
+                                 for stage in view['service_map']['stages']],
+                        'widths': [5.2, 5.1, 6.7], 'keep_together': False})
     for group in view.get('priority_groups', []):
         if not group['items']:
             continue
@@ -108,8 +115,6 @@ def _blocks(view):
     yield ('requisites', view['requisites'])
     if view.get('scope'):
         yield ('paragraph', view['scope'])
-    if view['full_title']:
-        yield ('paragraph', view['full_title'])
 
 
 def _font(style, size, *, bold=False, color=None):
@@ -362,7 +367,9 @@ def render_pdf(artifact, *, view=None):
         'tablehead': ParagraphStyle('tablehead', fontName='GovAISansBold', fontSize=10.5, leading=12.3),
     }
     styles['brief_title'] = ParagraphStyle('brief_title', parent=styles['body'], spaceAfter=3)
-    styles['group_intro'] = ParagraphStyle('group_intro', parent=styles['body'], keepWithNext=True)
+    # Keep the category heading with its explanation, not with the entire next
+    # table. Tables repeat their headers and may use the remaining page space.
+    styles['group_intro'] = ParagraphStyle('group_intro', parent=styles['body'])
     styles['highlight'] = ParagraphStyle('highlight', fontName='GovAISansBold', fontSize=19, leading=22, spaceAfter=5, textColor=colors.HexColor('#'+_COLORS['green']))
     styles['small'] = ParagraphStyle('small', parent=styles['body'], fontSize=10.5, leading=13, spaceAfter=4)
     styles['flow'] = ParagraphStyle('flow', parent=styles['small'], alignment=1, spaceAfter=0)

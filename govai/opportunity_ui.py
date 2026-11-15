@@ -289,6 +289,13 @@ def _render_management(view):
                 '</small><strong>' + html_escape(item['value']) + '</strong><p>' + html_escape(item['label']) +
                 '</p><small>' + html_escape(item['basis']) + '</small><p>' + html_escape(item['note']) + '</p></article>')
         st.html('<section class="govai-highlights" aria-label="Эффект и предпосылки">' + ''.join(panels) + '</section>')
+    if view.get('service_map'):
+        st.subheader('Как проходит услуга')
+        st.caption(escape_text(view['service_map']['scope']))
+        for stage in view['service_map']['stages']:
+            st.markdown('**' + escape_text(stage['stage']) + '**')
+            st.write(escape_text(stage['participant'] + ' → ' + stage['result']))
+            st.caption(escape_text(stage['clauses']))
     for group in view['priority_groups']:
         st.subheader(group['title'])
         st.caption(escape_text(group['explanation']))
