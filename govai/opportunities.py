@@ -485,8 +485,8 @@ def canonical_plan(plan):
     return parsed.model_copy(update={'proposals': rows})
 
 
-def _measurement_scenarios(p, m):
-    """Validate an explicitly bounded measurement and only task-specific LLM time assumptions."""
+def _measurement_scenarios(p, m) -> tuple[list[Scenario] | None, list[str], list[str]]:
+    """Return scenarios, measurement-definition issues, and optional-assumption issues."""
     measurement = p.measurement
     sources = measurement.source_action_ids
     allowed = {sid for a in m['actions'] if a['id'] in p.action_ids for sid in a['source_action_ids']}
@@ -509,7 +509,7 @@ def _measurement_scenarios(p, m):
     cases = measurement.time_scenarios
     if not cases: return None, [], []
     if p.economic_model != 'labor_time':
-        return None, [], [], ['Предложенные минуты не соответствуют основной метрике; сохранён только план измерения.']
+        return None, [], ['Предложенные минуты не соответствуют основной метрике; сохранён только план измерения.']
     if len({s.rationale.strip().casefold() for s in cases}) != len(cases):
         return None, [], ['Различие сложности или остаточной работы человека между сценариями не объяснено.']
     result = []

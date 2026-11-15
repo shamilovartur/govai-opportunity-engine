@@ -953,3 +953,33 @@ def test_concise_case_unit_is_not_confused_with_missing_measurement_definition()
     row=generate_opportunities(n,a,OpportunityMock(plan(p)))['report']['initiatives'][0]
     assert row['economics']['scenarios'][1]['results']['saved_minutes']['value']=='8.00'
     assert not row['measurement']['validation_issues']
+
+
+@pytest.mark.parametrize('category,model', [
+    ('money','time_capacity'), ('quality','qualitative'), ('elapsed_time','elapsed_time'),
+])
+def test_time_scenarios_for_other_metrics_keep_hypothesis_and_other_initiatives(category,model):
+    from opportunity_helpers import labor_assumptions
+    _,_,analysis,normalized=simple_map(
+        ('Специалист ведомства проверяет содержание документов.',
+         'Специалист ведомства готовит проект ответа.'),
+        actors=('Специалист ведомства','Специалист ведомства'), participants=('agency','agency'))
+    unsupported=proposal(normalized,['op-0'],key='other-metric',title='Проверка содержания',economic_model=model)
+    unsupported['measurement']['time_scenarios']=labor_assumptions()
+    supported=proposal(normalized,['op-1'],key='labor',title='Подготовка проекта',economic_model='labor_time')
+    supported['measurement']['time_scenarios']=labor_assumptions()
+    original=deepcopy(unsupported)
+    provider=OpportunityMock(plan(unsupported,supported)); pending=[]
+    artifact=generate_opportunities(normalized,analysis,provider,on_plan=pending.append)
+    report=artifact['report']; rows={row['id']:row for row in report['initiatives']}
+    assert set(rows)=={'other-metric','labor'} and not report['rejected']
+    affected=rows['other-metric']
+    assert affected['measurement']['primary']['category']==category
+    assert affected['economics']['status']=='needs_data' and affected['economics']['scenarios']==[]
+    assert any('минуты не соответствуют основной метрике' in reason for reason in affected['economics']['reasons'])
+    assert affected['measurement']['method'] and affected['grounding'] and affected['evidence_refs']
+    assert rows['labor']['economics']['scenarios'][1]['results']['saved_minutes']['value']=='8.00'
+    assert unsupported==original and artifact['plan']['proposals'][0]['measurement']['time_scenarios']==original['measurement']['time_scenarios']
+    assert restore_opportunities(json.dumps(artifact).encode(),normalized,analysis,'test-model')==artifact
+    retried=generate_opportunities(normalized,analysis,None,model='test-model',provider_name='openai',saved_plan=pending[0])
+    assert retried['report']==report and len(provider.calls)==1
