@@ -553,3 +553,150 @@ def test_resource_task_range_is_total_for_its_role_group_not_per_person():
     assert result['effort']['min'] == '4.75' and result['effort']['max'] == '9.50'
     assert result['tasks'][0]['lower_days'] == '1.5'
     assert any('умножать его на число участников нельзя' in text for text in result['limitations'])
+
+
+def prototype_parameters(**overrides):
+    from govai.economics import PROTOTYPE_UNITS
+    values = {'case_count': '1000', 'before_minutes': '20', 'after_minutes': '12',
+              'person_days_min': '6', 'person_days_max': '11', 'hours_per_day': '8',
+              'team_hour_rate': '2500', 'staff_hour_rate': '1000',
+              'cash_realization': '1', 'variable_cost_per_case': '5'}
+    values.update(overrides)
+    return {name: {'value': value, 'origin': 'illustrative' if value is not None else 'unknown',
+                   'unit': PROTOTYPE_UNITS[name],
+                   'note': 'Явный условный пример одной операции, с проверкой результата сотрудником; не замер ведомства.',
+                   'evidence_refs': []} for name, value in values.items()}
+
+
+@pytest.mark.parametrize('before,after,days,hours,cost,net,total,threshold,whole', [
+    ('20', '12', ('6', '11'), '133.33', ('120000.00', '220000.00'), '128.33', '128333.33', ('935.06', '1714.29'), ('936', '1715')),
+    ('40', '30', ('8', '14'), '166.67', ('160000.00', '280000.00'), '161.67', '161666.67', ('989.69', '1731.96'), ('990', '1732')),
+    ('6', '4', ('7', '12'), '33.33', ('140000.00', '240000.00'), '28.33', '28333.33', ('4941.18', '8470.59'), ('4942', '8471')),
+])
+def test_approved_reference_prototype_arithmetic_is_recomputed_not_copied(before, after, days, hours, cost, net, total, threshold, whole):
+    from govai.economics import calculate_prototype_economics
+    params = prototype_parameters(before_minutes=before, after_minutes=after,
+                                  person_days_min=days[0], person_days_max=days[1])
+    original = deepcopy(params)
+    result = calculate_prototype_economics(params); values = result['results']
+    assert params == original
+    assert result['status'] == 'illustrative' and result['budget_savings'] is None
+    assert result['missing_parameters'] == []
+    assert values['saved_hours']['value'] == hours
+    assert values['net_value_per_case']['value'] == net
+    assert values['net_value_for_cases']['value'] == total
+    assert tuple(values['prototype_cost_' + b]['value'] for b in ('min', 'max')) == cost
+    assert tuple(values['threshold_cases_' + b]['value'] for b in ('min', 'max')) == threshold
+    assert tuple(values['threshold_cases_' + b]['minimum_whole_cases'] for b in ('min', 'max')) == whole
+    assert all(p['origin'] == 'illustrative' for p in result['parameters'].values())
+    assert all(v['parameter_origins'] == ['illustrative'] for v in values.values())
+    assert all(v['formula'] and v['unit'] and v['input_parameters'] for v in values.values())
+    assert 'не доказывает фактическое сокращение расходов' in result['budget_savings_reason']
+
+
+def test_prototype_unknown_inputs_never_become_defaults_or_zero():
+    from govai.economics import calculate_prototype_economics, PROTOTYPE_UNITS
+    empty = calculate_prototype_economics({})
+    assert empty['status'] == 'needs_data'
+    assert set(empty['missing_parameters']) == set(PROTOTYPE_UNITS)
+    assert all(p['value'] is None and p['origin'] == 'unknown' for p in empty['parameters'].values())
+    assert all(value['value'] is None for value in empty['results'].values())
+    params = prototype_parameters(staff_hour_rate=None, hours_per_day=None, case_count=None)
+    result = calculate_prototype_economics(params)['results']
+    assert result['saved_minutes']['value'] == '8.00'
+    assert result['saved_hours']['value'] is None
+    assert result['net_value_per_case']['value'] is None
+    assert result['prototype_cost_min']['value'] is None
+    assert result['threshold_cases_min']['value'] is None
+    assert result['threshold_cases_min']['minimum_whole_cases'] is None
+
+
+def test_prototype_known_part_of_resource_range_does_not_invent_unknown_maximum():
+    from govai.economics import calculate_prototype_economics
+    result = calculate_prototype_economics(prototype_parameters(person_days_max=None))
+    assert result['status'] == 'needs_data'
+    assert result['missing_parameters'] == ['person_days_max']
+    assert result['results']['prototype_cost_min']['value'] == '120000.00'
+    assert result['results']['prototype_cost_max']['value'] is None
+    assert result['results']['threshold_cases_max']['value'] is None
+
+
+@pytest.mark.parametrize('change', [
+    {'cash_realization': '1.01'}, {'cash_realization': '-0.1'},
+    {'hours_per_day': '0'}, {'hours_per_day': '25'},
+    {'person_days_min': '12', 'person_days_max': '11'},
+    {'before_minutes': '-1'}, {'team_hour_rate': 'Infinity'},
+    {'staff_hour_rate': 'NaN'}, {'case_count': '1e16'},
+])
+def test_prototype_invalid_numbers_ranges_and_cash_shares_are_rejected(change):
+    from govai.economics import calculate_prototype_economics
+    with pytest.raises(ProcessError, match='параметры прототипа'):
+        calculate_prototype_economics(prototype_parameters(**change))
+
+
+@pytest.mark.parametrize('mutation', ['unit', 'origin', 'blank_note', 'unknown_parameter', 'document_without_evidence'])
+def test_prototype_units_and_numeric_origins_remain_mandatory(mutation):
+    from govai.economics import calculate_prototype_economics
+    values = prototype_parameters()
+    if mutation == 'unit': values['person_days_min']['unit'] = 'calendar_days'
+    elif mutation == 'origin': values['case_count']['origin'] = 'unknown'
+    elif mutation == 'blank_note': values['after_minutes']['note'] = ' '
+    elif mutation == 'unknown_parameter': values['guaranteed_savings'] = values['staff_hour_rate']
+    else: values['staff_hour_rate']['origin'] = 'document'
+    with pytest.raises(ProcessError): calculate_prototype_economics(values)
+
+
+@pytest.mark.parametrize('changes,net', [
+    ({'cash_realization': '0'}, '-5.00'),
+    ({'before_minutes': '12', 'after_minutes': '20'}, '-138.33'),
+    ({'before_minutes': '12', 'after_minutes': '12', 'variable_cost_per_case': '0'}, '0.00'),
+])
+def test_nonpositive_net_effect_preserves_losses_and_has_no_positive_threshold(changes, net):
+    from govai.economics import calculate_prototype_economics
+    result = calculate_prototype_economics(prototype_parameters(**changes))
+    assert result['results']['net_value_per_case']['value'] == net
+    for bound in ('min', 'max'):
+        threshold = result['results']['threshold_cases_' + bound]
+        assert threshold['value'] is None and threshold['minimum_whole_cases'] is None
+        assert 'неположителен' in threshold['reason']
+    assert result['budget_savings'] is None
+    if changes.get('after_minutes') == '20':
+        assert result['results']['saved_hours']['value'] == '-133.33'
+        assert any('отрицательный эффект' in warning for warning in result['warnings'])
+
+
+def test_cash_realization_changes_threshold_without_changing_released_hours():
+    from govai.economics import calculate_prototype_economics
+    result = calculate_prototype_economics(prototype_parameters(cash_realization='0.5'))
+    assert result['results']['saved_hours']['value'] == '133.33'
+    assert result['results']['capacity_equivalent_per_case']['value'] == '133.33'
+    assert result['results']['net_value_per_case']['value'] == '61.67'
+    assert result['results']['threshold_cases_min']['value'] == '1945.95'
+    assert result['results']['threshold_cases_max']['value'] == '3567.57'
+    assert result['results']['threshold_cases_min']['minimum_whole_cases'] == '1946'
+    assert result['results']['threshold_cases_max']['minimum_whole_cases'] == '3568'
+
+
+def test_prototype_rounding_is_not_used_as_a_calculation_operand():
+    from govai.economics import calculate_prototype_economics
+    result = calculate_prototype_economics(prototype_parameters())['results']
+    # 128.33 * 1000 would incorrectly produce 128330, rather than the exact calculation rounded once.
+    assert result['net_value_for_cases']['value'] == '128333.33'
+    assert result['net_value_for_cases']['value'] != str(Decimal(result['net_value_per_case']['value']) * 1000)
+    assert Decimal(result['threshold_cases_min']['exact_value']) > Decimal(result['threshold_cases_min']['value'])
+
+
+def test_tiny_positive_effect_uses_unrounded_threshold_and_explicit_whole_cases():
+    from govai.economics import calculate_prototype_economics
+    result = calculate_prototype_economics(prototype_parameters(
+        before_minutes='1.000000000001', after_minutes='1', variable_cost_per_case='0',
+        staff_hour_rate='1', person_days_min='1', person_days_max='1', team_hour_rate='1', hours_per_day='1'))['results']
+    assert result['net_value_per_case']['value'] == '0.00'
+    assert Decimal(result['net_value_per_case']['exact_value']) > 0
+    assert result['threshold_cases_min']['minimum_whole_cases'] == '60000000000000'
+
+
+def test_prototype_empty_or_non_mapping_input_is_not_silently_coerced():
+    from govai.economics import calculate_prototype_economics
+    with pytest.raises(ProcessError): calculate_prototype_economics(None)
+    with pytest.raises(ProcessError): calculate_prototype_economics([])

@@ -15,6 +15,16 @@ from govai.extraction import (
 from govai.url_input import extract_url_document
 from govai.process_ui import render_processes
 from govai.document_ui import document_header
+from govai.reference import match_reference, example_document_bytes
+from govai.opportunity_ui import render_ready_report
+from govai.processes import ProcessError
+
+
+def _clear_active_analysis():
+    """Clear displayed state; source-bound recovery caches remain available."""
+    for key in ('process_result', 'process_document', 'process_result_bytes', 'verified_analysis',
+                'process_origin', 'process_error', 'reference_result', 'active_document_key'):
+        st.session_state.pop(key, None)
 
 
 def _localize_document_upload():
@@ -104,6 +114,15 @@ def _load_input():
     )
     _localize_document_upload()
     if uploaded_file is None:
+        with st.expander('Пример: Росимущество №261', expanded=False):
+            st.caption('Полный текст редакции 30.05.2023. Загрузите этот файл, чтобы открыть проверенный разбор без обращения к модели.')
+            try:
+                sample = example_document_bytes()
+            except ProcessError:
+                st.caption('Пример временно недоступен. Можно загрузить свой документ.')
+            else:
+                st.download_button('Скачать исходник примера', sample,
+                                   file_name='rosimushchestvo-261.txt', mime='text/plain', on_click='ignore')
         return None
     encoding = 'utf-8-sig'
     if Path(uploaded_file.name).suffix.lower() == '.txt':
@@ -141,18 +160,24 @@ def _load_input():
 
 def main() -> None:
     st.set_page_config(page_title="GovAI — варианты для внедрения ИИ", page_icon="📄")
-    if not st.session_state.get('process_result'):
+    if not (st.session_state.get('process_result') or st.session_state.get('reference_result')):
         st.title('Поиск вариантов для внедрения ИИ')
         st.write('Загрузите документ в удобном формате. Агент изучит рабочий процесс '
                  'и предложит рекомендации по оптимизации')
     document = _load_input()
     if document is None:
-        for key in ('process_result', 'process_document', 'process_result_bytes', 'verified_analysis', 'process_origin', 'process_error'):
-            st.session_state.pop(key, None)
+        _clear_active_analysis()
         return
+
+    identity = (document['source']['sha256'], sha256(document['text'].encode()).hexdigest(),
+                document['source']['format'])
+    if st.session_state.get('active_document_key') != identity:
+        _clear_active_analysis()
+        st.session_state.active_document_key = identity
 
     text = document["text"]
     if not text.strip():
+        _clear_active_analysis()
         st.warning(
             "В документе не найден текст. Загрузите текстовую копию документа. "
             "Скан без распознанного текста пока не поддерживается."
@@ -162,6 +187,19 @@ def main() -> None:
     if not st.session_state.get('process_result'):
         st.success("Документ загружен.")
     document_header(document)
+    try:
+        reference = match_reference(document)
+    except ProcessError:
+        st.session_state.pop('reference_result', None)
+        st.error('Не удалось проверить сохранённый разбор. Владельцу приложения нужно восстановить его комплект файлов. Запрос к модели не отправлен.')
+        return
+    if reference is not None:
+        changed = st.session_state.get('reference_result') != reference
+        st.session_state.reference_result = reference
+        if changed:
+            st.rerun()
+        render_ready_report('reference-' + reference['artifact_id'], reference, document=document)
+        return
     render_processes(document)
 
 

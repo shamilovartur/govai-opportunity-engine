@@ -1,0 +1,17 @@
+{
+  "version": "reference-v3-final6",
+  "source_sha256": "8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4",
+  "full_text_normalized_sha256": "cffad20d3cded12cce2e036f3872e587516e8ee552e9e5efb243bee607fbaa7f",
+  "normalization": "Remove leading BOM; Unicode NFC; replace each Unicode whitespace run with one ASCII space; strip surrounding whitespace. Preserve every word, number, punctuation mark, case and ordering.",
+  "match_policy": "Exact full-text digest only; no title, URL, filename, number-only or fuzzy automatic match.",
+  "edition": "2023-05-30",
+  "source_url": "https://raw.githubusercontent.com/shamilovartur/govai-opportunity-engine/67c9c5431f80a5d0b4e3536f9ccd94027ad8a32d/examples/rosimushchestvo_261/source.txt",
+  "cost_of_restoring_reference_api_calls": 0,
+  "finalized_date": "2026-11-16",
+  "status": "user_approved_final_reference",
+  "reference_pdf_sha256": "0d3edf893a2fa63265d88a70b52b496495dffaf94d89dd96270f6fed89d45da6",
+  "pages": 6,
+  "supersedes_transfer_package": "GovAI_Prototype_Transfer_v2.zip",
+  "basis": "Пользователь одобрил итоговый шестистраничный PDF 16 ноября 2026: «Хорошо получилось». Содержание, нумерация, расчёты и оформление зафиксированы.",
+  "approved_date": "2026-11-16"
+}

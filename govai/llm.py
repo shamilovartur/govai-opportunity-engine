@@ -163,9 +163,9 @@ class OpenAIOpportunityProvider(OpenAIProvider):
     from govai.opportunities import PROMPT_VERSION as prompt_version, PROMPT_SHA256 as prompt_sha256
 
     def opportunities(self, payload, *, max_output_tokens):
-        from govai.opportunities import INSTRUCTIONS as OPPORTUNITY_INSTRUCTIONS, OperationalOpportunityPlan
+        from govai.opportunities import INSTRUCTIONS as OPPORTUNITY_INSTRUCTIONS, RankedOpportunityPlan
         try:
-            return self.structured(payload, instructions=OPPORTUNITY_INSTRUCTIONS, schema=OperationalOpportunityPlan,
+            return self.structured(payload, instructions=OPPORTUNITY_INSTRUCTIONS, schema=RankedOpportunityPlan,
                                    schema_name='ai_opportunities', max_output_tokens=max_output_tokens,
                                    retries=0, compact=True, request_timeout=300)
         except ProcessError as exc:

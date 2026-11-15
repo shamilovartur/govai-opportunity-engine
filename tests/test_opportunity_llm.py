@@ -6,7 +6,7 @@ from govai.llm import OpenAIProvider, OpenAINormalizer, OpenAIOpportunityProvide
 from govai.opportunities import OpportunityError, generate_opportunities, prepare_request, PROMPT_VERSION
 from test_llm import provider as transport_provider, response
 from opportunity_helpers import simple_map, proposal
-from test_opportunities import plan, presented_plan
+from test_opportunities import plan, ranked_plan
 
 
 def adapter(handler):
@@ -16,7 +16,7 @@ def adapter(handler):
 
 
 def test_opportunity_schema_uses_shared_transport_and_its_own_prompt():
-    _,_,a,n=simple_map(); ready=presented_plan(proposal(n)); seen=[]
+    _,_,a,n=simple_map(); ready=ranked_plan(proposal(n)); seen=[]
     def handle(request):
         seen.append(json.loads(request.content))
         return httpx.Response(200,json=response(ready.model_dump_json(),usage={'input_tokens':11,'output_tokens':7,'total_tokens':18}))
@@ -31,14 +31,14 @@ def test_opportunity_schema_uses_shared_transport_and_its_own_prompt():
         assert p.last_call_elapsed_seconds is not None and p.last_call_elapsed_seconds>=0
         assert OpenAIProvider.prompt_version=='1.0' and OpenAINormalizer.prompt_version=='normalization-1.0'
         assert 'исходный акт' in body['instructions']
-        assert 'обычно 2–3' in body['instructions'] and '3–4 коротких работ' in body['instructions']
-        assert 'не для каждой инициативы' in body['instructions']
-        assert r['schema_version']=='2.4' and r['plan']['executive_summary']==ready.executive_summary
+        assert ' '.join(body['instructions'].split()).find('обычно 2–3')>=0 and '3–4 коротких работ' in body['instructions']
+        assert 'Не переноси один ресурсный диапазон на все идеи' in body['instructions']
+        assert r['schema_version']=='2.5' and r['plan']['executive_summary']==ready.executive_summary
         schema=body['text']['format']['schema']
         assert 'executive_summary' in schema['required']
-        assert 'recommendation_title' in schema['required']
-        assert 'presentation' in schema['$defs']['ResourcedProposal']['required']
-        assert {'resources','proposed_flow'}<=set(schema['$defs']['ResourcedProposal']['required'])
+        assert {'recommendation_title','priority_order'}<=set(schema['required'])
+        assert 'presentation' in schema['$defs']['RankedProposal']['required']
+        assert {'resources','proposed_flow','input_materials','staff_result'}<=set(schema['$defs']['RankedProposal']['required'])
         for definition in [schema,*schema['$defs'].values()]:
             assert definition['additionalProperties'] is False
             assert set(definition['required'])==set(definition['properties'])
@@ -51,8 +51,8 @@ def test_opportunity_schema_uses_shared_transport_and_its_own_prompt():
 
 
 def test_current_strict_schema_has_required_nullable_fields_and_resolvable_references():
-    from govai.opportunities import OperationalOpportunityPlan
-    schema=OperationalOpportunityPlan.model_json_schema()
+    from govai.opportunities import RankedOpportunityPlan
+    schema=RankedOpportunityPlan.model_json_schema()
     assert schema['type']=='object' and 'anyOf' not in schema
     def visit(value):
         if isinstance(value,dict):
@@ -68,7 +68,7 @@ def test_current_strict_schema_has_required_nullable_fields_and_resolvable_refer
             for child in value:visit(child)
     visit(schema)
     for definition,field in [('Measurement','secondary'),('Measurement','quality_protocol'),
-                             ('ResourcedProposal','incremental_value'),('TimeParameter','value'),
+                             ('RankedProposal','incremental_value'),('TimeParameter','value'),
                              ('ResourceTask','lower_days'),('ResourceTask','upper_days')]:
         parent=schema['$defs'][definition]
         assert field in parent['required']
@@ -77,9 +77,9 @@ def test_current_strict_schema_has_required_nullable_fields_and_resolvable_refer
 
 def test_current_wire_schema_only_removes_redundant_annotations_not_data_or_constraints():
     from pydantic import BaseModel
-    from govai.opportunities import OperationalOpportunityPlan
-    original=BaseModel.model_json_schema.__func__(OperationalOpportunityPlan)
-    compact=OperationalOpportunityPlan.model_json_schema()
+    from govai.opportunities import RankedOpportunityPlan
+    original=BaseModel.model_json_schema.__func__(RankedOpportunityPlan)
+    compact=RankedOpportunityPlan.model_json_schema()
     def equivalent(old,new):
         if isinstance(old,dict):
             ignored={'title'} if isinstance(old.get('title'),str) else set()
@@ -90,8 +90,8 @@ def test_current_wire_schema_only_removes_redundant_annotations_not_data_or_cons
             for left,right in zip(old,new):equivalent(left,right)
         else:assert old==new
     equivalent(original,compact)
-    assert 'title' in compact['$defs']['ResourcedProposal']['properties']
-    assert 'title' in compact['$defs']['ResourcedProposal']['required']
+    assert 'title' in compact['$defs']['RankedProposal']['properties']
+    assert 'title' in compact['$defs']['RankedProposal']['required']
     assert len(json.dumps(compact))<len(json.dumps(original))
 
 

@@ -1,8 +1,10 @@
 """Report generation and display; imports and diagnostics stay in the technical section."""
 
 import json
+import base64
 from html import escape as html_escape
 import os
+from pathlib import Path
 import time
 from uuid import uuid4
 
@@ -17,9 +19,24 @@ from govai.opportunities import (OpportunityError, compatibility, generate_oppor
 from govai.opportunity_report import (management_view, render_markdown, render_details,
                                       _safe as escape_text)
 from govai.processes import ProcessError
-from govai.document_ui import analysis_error_message
+from govai.document_ui import analysis_error_message, technical_document
 from govai.map_ui import request_timing
 from govai.report_export import EXPORT_VERSION, render_pdf, render_docx, render_bundle, pdf_layout_status
+
+
+@st.cache_data(show_spinner=False)
+def _result_font_css(export_version):
+    """Bundle result fonts locally; no third-party font request or server setup."""
+    rules = []
+    for weight, name in ((400, 'Regular'), (600, 'SemiBold')):
+        try:
+            data = Path(__file__).with_name('fonts').joinpath(f'IBMPlexSans-{name}.ttf').read_bytes()
+        except OSError:
+            return ''  # The document exports report their own missing-font errors.
+        rules.append('@font-face{font-family:GovAIResult;src:url(data:font/ttf;base64,' +
+                     base64.b64encode(data).decode('ascii') + ') format("truetype");font-weight:' +
+                     str(weight) + ';font-display:swap;}')
+    return ''.join(rules)
 
 
 def _export_failure(label, error):
@@ -128,14 +145,14 @@ def _exports(key, artifact):
     return files
 
 
-def _source_downloads(files, *, prefix, include_pdf=False):
+def _source_downloads(files, *, prefix, include_pdf=False, reference=False):
     """Fallback and technical exports remain independently available."""
     formats = [
         ('docx', 'Скачать отчёт (DOCX)', 'opportunity-report.docx',
          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
         ('markdown', 'Скачать Markdown', 'opportunity-report.md', 'text/markdown'),
         ('details', 'Скачать подробные материалы', 'opportunity-details.txt', 'text/plain'),
-        ('json', 'Скачать данные анализа (JSON)', 'opportunities.json', 'application/json'),
+        ('json', 'Скачать данные анализа (JSON)', 'reference-result.json' if reference else 'opportunities.json', 'application/json'),
     ]
     if include_pdf:
         formats.insert(0, ('pdf', 'Скачать отчёт PDF', 'opportunity-report.pdf', 'application/pdf'))
@@ -228,13 +245,22 @@ def render_opportunities(normalized, analysis):
                     st.session_state.get('opportunity_started', {}).pop(key, None)
             st.rerun()
         return
+    render_ready_report(key, artifact)
+
+
+def render_ready_report(key, artifact, *, document=None):
+    """One result screen for verified references and newly generated reports."""
+    reference = artifact.get('kind') == 'govai_verified_reference'
     # All presentations share a cached view and already prepared bytes.
     files = _exports(key, artifact)
-    st.success('Отчёт готов.')
+    st.success(files['view']['reference_label'] if reference and files['view'] else 'Отчёт готов.')
     if (files.get('pdf_layout') or {}).get('exceeded'):
         st.warning(files['pdf_layout']['message'])
+    st.caption('В полном отчёте — карта процессов, подробные предложения и расчёт экономики')
     if files['pdf'] is not None:
-        st.download_button('Скачать отчёт PDF', files['pdf'], type='primary',
+        pages = files['pdf_layout']['pages']
+        ending = 'страница' if pages % 10 == 1 and pages % 100 != 11 else 'страницы' if pages % 10 in (2, 3, 4) and pages % 100 not in (12, 13, 14) else 'страниц'
+        st.download_button(f'Скачать полный отчёт (PDF, {pages} {ending})', files['pdf'], type='primary',
                            file_name='opportunity-report.pdf', mime='application/pdf',
                            on_click='ignore', width='stretch')
     if files['zip'] is not None:
@@ -248,7 +274,7 @@ def render_opportunities(normalized, analysis):
                       if files['json'] is not None else 'Сохраните доступные документы; полный JSON сейчас подготовить не удалось.'))
         for error in files.get('errors', []):
             st.caption(error['format'] + ': ' + error['reason'])
-        _source_downloads(files, prefix='fallback')
+        _source_downloads(files, prefix='fallback', reference=reference)
     st.caption('Сохраните архив: он содержит отчёт и полный JSON для восстановления. '
                'Без скачанной копии результат может быть потерян после завершения сессии.')
     view = files['view']
@@ -262,66 +288,58 @@ def render_opportunities(normalized, analysis):
     elif outcome['state'] == 'none':
         st.info(outcome['message'])
     _render_management(view)
+    if reference:
+        with st.expander('Технические данные', expanded=False):
+            st.caption('Сохранённый утверждённый разбор. Новые запросы к модели не выполнялись.')
+            _source_downloads(files, prefix='reference', reference=True)
+            st.caption('PDF совпадает с утверждённым файлом; JSON имеет отдельный формат проверенного разбора.')
+            if document is not None:
+                technical_document(document)
 
 
 def _render_management(view):
-    """Render the shared report view; no classification, calculation or model call here."""
-    st.html("""<style>
-    .st-key-govai_conclusion {background:#EAF4EF;padding:1.25rem;border-radius:0.75rem;}
-    .govai-highlights {display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1rem 0;}
-    .govai-highlight {background:#EDF3F8;color:#24312D;padding:1rem;border-radius:0.65rem;}
-    .govai-highlight strong {display:block;font-size:1.65rem;line-height:1.25;margin:0.5rem 0;}
-    .govai-highlight p {margin:0.4rem 0;line-height:1.5;}
-    .govai-highlight small {display:block;line-height:1.5;}
-    .govai-flow {display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin:0.75rem 0;}
-    .govai-flow span {background:#EDF3F8;color:#24312D;padding:0.65rem;border-radius:0.4rem;}
-    @media(max-width:600px){.govai-flow {flex-direction:column;align-items:stretch;}.govai-flow b {text-align:center;transform:rotate(90deg);}}
+    """Only the concise agenda is rendered here; full analysis remains in exports."""
+    st.html('<style>' + _result_font_css(EXPORT_VERSION) + """
+    div[class*="st-key-govai_card_"] {background:#F0F4F2;color:#23312C;padding:1.2rem;border-radius:0.8rem;margin:0.5rem 0;font-family:GovAIResult,Arial,sans-serif;}
+    div[class*="st-key-govai_card_"] p {font-family:inherit;}
+    .st-key-govai_card_1 {background:#E5F2E9 !important;}
+    .st-key-govai_card_2 {background:#EDF3F8 !important;}
+    .st-key-govai_card_3 {background:#F4F0E7 !important;}
+    .govai-card-heading {display:flex;align-items:baseline;gap:1rem;line-height:1.3;margin-bottom:0.7rem;}
+    .govai-card-heading span {font-size:2.2rem;font-weight:600;color:#26744B;flex:0 0 auto;}
+    .govai-card-heading strong {font-size:1.25rem;overflow-wrap:anywhere;}
+    @media(max-width:600px){div[class*="st-key-govai_card_"]{padding:0.9rem;}.govai-card-heading{gap:0.65rem;}}
     </style>""")
-    with st.container(key='govai_conclusion'):
-        st.subheader(view['conclusion']['heading'])
-        st.write(escape_text(view['conclusion']['text']))
+    cards = view.get('cards', [])
+    st.subheader(view.get('summary_heading') or 'Очередь ИИ-доработок')
+    if view.get('summary_intro'):
+        st.write(escape_text(view['summary_intro']))
     if view.get('input_limitation'):
         st.caption(escape_text(view['input_limitation']))
-    if view['highlights']:
-        panels = []
-        for item in view['highlights']:
-            panels.append('<article class="govai-highlight"><small>' + html_escape(item['status']) +
-                '</small><strong>' + html_escape(item['value']) + '</strong><p>' + html_escape(item['label']) +
-                '</p><small>' + html_escape(item['basis']) + '</small><p>' + html_escape(item['note']) + '</p></article>')
-        st.html('<section class="govai-highlights" aria-label="Эффект и предпосылки">' + ''.join(panels) + '</section>')
-    if view.get('service_map'):
-        st.subheader('Как проходит услуга')
-        st.caption(escape_text(view['service_map']['scope']))
-        for stage in view['service_map']['stages']:
-            st.markdown('**' + escape_text(stage['stage']) + '**')
-            st.write(escape_text(stage['participant'] + ' → ' + stage['result']))
-            st.caption(escape_text(stage['clauses']))
-    for group in view['priority_groups']:
-        st.subheader(group['title'])
-        st.caption(escape_text(group['explanation']))
-        for row in group['items']:
-            st.markdown('**' + escape_text(f"№ {row['number']}. {row['title']}") + '**')
-            st.write(escape_text(row['benefit']))
-            st.caption(escape_text(row['category_label'] + '. Условие: ' + row['condition']))
-    if view['pilots']:
-        st.subheader('Как проверить первые решения')
-    for pilot in view['pilots']:
-        st.markdown('**' + escape_text(f"№ {pilot['number']}. {pilot['title']}") + '**')
-        st.write(escape_text(pilot['narrative']))
-        if pilot['flow']:
-            st.caption('Предлагаемый порядок работы')
-            flow = '<b aria-hidden="true">→</b>'.join('<span>' + html_escape(step) + '</span>' for step in pilot['flow'])
-            st.html('<div class="govai-flow" aria-label="Предлагаемый порядок работы">' + flow + '</div>')
-        for field in ('effect', 'resources', 'reason', 'check'):
-            if pilot[field]: st.write(escape_text(pilot[field]))
-        st.caption('Главное условие: ' + escape_text(pilot['condition']))
-        st.caption('Основание: ' + escape_text(pilot['clauses']))
-    with st.expander('Условия и основания', expanded=False):
-        for condition in view['conditions']: st.write(escape_text(condition))
-        st.caption(escape_text(view['requisites']))
-        for source in view['source_index']:
-            st.caption(escape_text(f"№ {source['number']} — {source['clauses']}"))
-        st.caption(escape_text(view['detail_note']))
+    for card in cards:
+        number = card['rank']
+        with st.container(key=f'govai_card_{number}'):
+            # Only an integer rank and HTML-escaped display text enter this markup.
+            st.markdown('<div class="govai-card-heading"><span>' + str(number) +
+                        '</span><strong>' + html_escape(card['title']) + '</strong></div>',
+                        unsafe_allow_html=True)
+            context = [card[field] for field in ('process', 'category_label') if card.get(field)]
+            if context:
+                st.caption(escape_text(' · '.join(context)))
+            st.write(escape_text(card['description']))
+            if card.get('effect'):
+                st.write(escape_text(card['effect']))
+            if card.get('resources'):
+                st.caption(escape_text(card['resources']))
+            if card.get('priority_reason'):
+                st.caption('Очередность: ' + escape_text(card['priority_reason']))
+            if card.get('condition'):
+                st.caption('Условие: ' + escape_text(card['condition']))
+    if not cards and view.get('outcome', {}).get('state') not in ('none', 'rejected', 'unfinished'):
+        st.info('Подходящие ИИ-доработки не определены. Объяснение и основания сохранены в полном отчёте.')
+    if cards:
+        st.caption('Это предварительная очередь. Ожидаемый эффект и ресурсные предпосылки нужно проверить; '
+                   'решения и утверждение документов остаются за уполномоченным сотрудником.')
 
 
 def render_opportunity_technical(normalized, analysis):

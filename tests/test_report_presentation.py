@@ -91,8 +91,8 @@ def test_full_pdf_survives_layout_overflow_without_losing_initiatives():
         row['condition'] = ('До пилота подтвердить доступ к материалам и правила человеческой проверки. ' * 6).strip()
     data = render_pdf(artifact, view=view)
     status = pdf_layout_status(data)
-    assert status['pages'] > 6 and status['exceeded'] and status['brief_limit'] == 6
-    assert 'полный PDF доступен' in status['message']
+    assert status['pages'] > 6 and not status['exceeded'] and status['brief_limit'] is None
+    assert status['message'] is None
     text = _pdf_text(data)
     for row in view['initiatives']:
         assert f"№ {row['number']}. {row['title']}" in text
@@ -105,7 +105,7 @@ def test_full_pdf_survives_layout_overflow_without_losing_initiatives():
         assert archive.testzip() is None
         assert archive.read('opportunity-report.pdf') == data
         assert json.loads(archive.read('opportunities.json')) == artifact
-        assert status['message'] in archive.read('README.txt').decode('utf-8')
+        assert 'число страниц зависит от документа' in archive.read('README.txt').decode('utf-8')
     assert artifact == unchanged
 
 
@@ -173,7 +173,7 @@ def test_category_meanings_and_known_participant_limit_are_visible():
 def test_a_short_pdf_status_does_not_report_an_overflow():
     artifact, _, _, _ = _management_fixture(0)
     data = render_pdf(artifact)
-    assert pdf_layout_status(data) == {'pages': 1, 'brief_limit': 6, 'exceeded': False, 'message': None}
+    assert pdf_layout_status(data) == {'pages': 1, 'brief_limit': None, 'exceeded': False, 'message': None}
     assert 'Предлагаемые инициативы' not in _pdf_text(data)
 
 
@@ -313,3 +313,91 @@ def test_summary_with_downgraded_assessment_cannot_promote_an_unjustified_pilot(
     assert 'Немедленно' not in view['conclusion']['text']
     assert 'немедленное' not in view['conclusion']['heading']
     assert not view['pilots'] and view['priority_groups'][0]['title'] == 'Пока не запускать'
+
+
+def test_comparative_queue_is_not_regrouped_by_category_in_any_full_format():
+    artifact, _, _, _ = _management_fixture(3)
+    rows = artifact['report']['initiatives']
+    rows[0]['prospect']['category'] = 'medium'
+    rows[0]['priority'].update(queue='reserve', reason='Сначала проверить доступ к документам: это условие для следующей доработки.')
+    rows[1]['priority'].update(queue='reserve', dependencies=[rows[0]['id']],
+                               reason='Зависит от подготовленной первой доработкой базы.')
+    for index, row in enumerate(rows, 1):
+        row['input_materials'] = [f'Проверенные материалы вида {index}']
+        row['staff_result'] = f'Проверяемая записка вида {index}'
+    view = management_view(artifact)
+    assert [card['number'] for card in view['cards']] == [1, 2, 3]
+    assert view['cards'][1]['dependencies'] == ['№ 1']
+    assert view['cards'][0]['priority_reason'] == rows[0]['priority']['reason']
+    pdf, docx = render_pdf(artifact), render_docx(artifact)
+    texts = [render_markdown(artifact).replace('\\.', '.'), _pdf_text(pdf),
+             ' '.join(node.text or '' for node in Document(BytesIO(docx)).element.iter() if node.tag.endswith('}t'))]
+    for text in texts:
+        positions = [text.index(f'№ {row["number"]}. {row["title"]}') for row in view['cards']]
+        assert positions == sorted(positions)
+        assert rows[0]['priority']['reason'] in text
+        assert 'Зависит от: № 1' in text
+        assert '0–100' not in text and '/100' not in text
+    # Only the independently testable third initiative is expanded, with concrete
+    # input and the employee's result. It does not silently skip its queue number.
+    assert [pilot['number'] for pilot in view['pilots']] == [3]
+    for text in texts:
+        assert rows[2]['input_materials'][0] in text
+        assert rows[2]['staff_result'] in text
+
+
+def test_full_process_map_keeps_groups_without_ai_and_context_is_not_an_operation():
+    artifact, _, _, _ = _management_fixture(2)
+    second = artifact['report']['process_map']['groups'][1]
+    second['initiative_ids'] = []
+    second['actions'][0]['kind'] = 'context'
+    second['non_ai_reasons'] = ['Формат записи проверяется обычным правилом.']
+    second['classification_issues'] = ['Нужно уточнить связь общего требования с операциями.']
+    view = management_view(artifact)
+    assert len(view['process_groups']) == 2
+    group = view['process_groups'][1]
+    assert not group['operations'] and group['context_records'] == 1
+    assert not group['initiative_numbers'] and group['requires_review']
+    for text in (render_markdown(artifact).replace('\\.', '.'), _pdf_text(render_pdf(artifact))):
+        assert 'Карта процессов' in text
+        assert second['title'] in text
+        assert second['non_ai_reasons'][0] in text
+        assert 'не подтверждённый самостоятельный бизнес-процесс' in text
+    assert 'context' in render_details(artifact)
+
+
+def test_generic_typeface_and_page_geometry_are_shared_without_a_page_quota():
+    for count in (0, 1, 8, 20):
+        artifact, _, _, _ = _management_fixture(count)
+        artifact['report']['presentation'] = {}
+        view = management_view(artifact)
+        assert [card['rank'] for card in view['cards']] == list(range(1, count + 1))
+        pdf = render_pdf(artifact)
+        reader = PdfReader(BytesIO(pdf))
+        assert all(tuple(float(x) for x in page.mediabox[2:]) == (450.0, 800.0) for page in reader.pages)
+        fonts = [str(font.get_object().get('/BaseFont')) for page in reader.pages
+                 for font in page['/Resources']['/Font'].get_object().values()]
+        assert any('IBMPlexSans' in font for font in fonts)
+        assert pdf_layout_status(pdf)['brief_limit'] is None
+        text = _pdf_text(pdf)
+        for row in view['cards']:
+            assert f'№ {row["rank"]}. {row["title"]}' in text
+            assert row['condition'] in text
+        document = Document(BytesIO(render_docx(artifact)))
+        assert document.styles['Normal'].font.name == 'IBM Plex Sans'
+        assert document.styles['Normal'].font.size.pt == 12
+        assert document.sections[0].page_width.pt == 450
+        assert document.sections[0].page_height.pt == 800
+
+
+def test_long_title_has_no_ellipsis_or_hidden_cutoff_and_card_summary_matches_view():
+    artifact, _, _, _ = _management_fixture(1)
+    title = 'Сопоставление ' + 'подтверждённых материалов и выводов ' * 35 + 'с итоговой запиской'
+    artifact['report']['initiatives'][0].setdefault('presentation', {})['short_title'] = title
+    view = management_view(artifact)
+    assert view['summary_intro'] == view['conclusion']['text']
+    assert view['summary_heading'] == view['conclusion']['heading']
+    assert view['cards'][0]['title'] == title
+    assert title in _pdf_text(render_pdf(artifact))
+    assert title in render_markdown(artifact)
+    assert '…' not in view['cards'][0]['title']

@@ -1,0 +1,2 @@
+# Approved reference resources are hashed byte-for-byte; preserve their CRLF.
+govai/reference_data/rosim261-v3/* -text whitespace=cr-at-eol

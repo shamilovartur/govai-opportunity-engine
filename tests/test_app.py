@@ -1,4 +1,8 @@
 from pathlib import Path
+from hashlib import sha256
+from io import BytesIO
+import re
+from zipfile import ZipFile
 from unittest.mock import patch
 
 import pytest
@@ -15,8 +19,9 @@ def technical(app, fragments=False):
     toggle = next((c for c in app.checkbox if c.label == 'Показать исходный текст и структуру'), None)
     if toggle:
         toggle.check().run(timeout=15)
-        if fragments:
-            next(c for c in app.checkbox if c.label == 'Показать фрагменты и ссылки на пункты').check().run(timeout=15)
+    fragment_toggle = next((c for c in app.checkbox if c.label == 'Показать фрагменты и ссылки на пункты'), None)
+    if fragments and fragment_toggle:
+        fragment_toggle.check().run(timeout=15)
     return app
 
 
@@ -38,7 +43,12 @@ def test_initial_screen():
     assert any(item.value == 'Загрузите документ в удобном формате. Агент изучит рабочий процесс '
                'и предложит рекомендации по оптимизации' for item in app.markdown)
     assert app.radio[0].label == 'Способ загрузки'
-    assert not app.subheader and not app.expander
+    assert not app.subheader
+    assert [e.label for e in app.expander] == ['Пример: Росимущество №261']
+    example = app.expander[0]
+    assert not example.proto.expanded
+    assert [b.label for b in example.get('download_button')] == ['Скачать исходник примера']
+    assert example.get('download_button')[0].proto.ignore_rerun
     assert not any('Скан без распознанного текста' in item.value for item in app.caption)
     uploader = app.get('file_uploader')[0].proto
     assert uploader.label == 'Выберите документ' and uploader.max_upload_size_mb == 10
@@ -226,3 +236,108 @@ def test_analysis_service_errors_explain_impact_without_internal_instructions(me
     assert all(token not in visible for token in ('JSON', 'Structured Outputs', 'secrets.toml'))
     integrity = 'Подтверждающая цитата не найдена в указанном фрагменте. Источник отклонён.'
     assert analysis_error_message(integrity) == integrity
+
+
+def _file(name, data):
+    return UploadedFile(UploadedFileRec(name, name, 'application/octet-stream', data), FileURLs())
+
+
+def _reference_source():
+    return (APP.parent / 'examples/rosimushchestvo_261/source.txt').read_bytes()
+
+
+def _reference_card_numbers(app):
+    return [int(match[1]) for item in app.markdown
+            if (match := re.match(r'<div class="govai-card-heading"><span>(\d+)</span>', item.value))]
+
+
+@pytest.mark.parametrize('filename', ['source.txt', 'renamed-full-regulation.txt'])
+def test_full_approved_source_shows_seven_cards_and_exact_pdf_without_provider(monkeypatch, filename):
+    import streamlit as st
+    from govai.reference import PDF_SHA256, restore_reference_result
+    from govai.extraction import extract_document
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.delenv('OPENAI_MODEL', raising=False)
+    data = _reference_source()
+    with patch('streamlit.file_uploader', return_value=_file(filename, data)), \
+         patch('govai.llm.OpenAIProvider.__init__', side_effect=AssertionError('No provider for approved source')) as provider, \
+         patch('govai.process_ui.extract_with_checkpoint', side_effect=AssertionError('No extraction')) as extract, \
+         patch('govai.map_ui.normalize_analysis', side_effect=AssertionError('No normalization')) as normalize, \
+         patch('govai.opportunity_ui.generate_opportunities', side_effect=AssertionError('No opportunity generation')) as generate, \
+         patch('streamlit.download_button', wraps=st.download_button) as downloads:
+        app = AppTest.from_file(str(APP)).run(timeout=15)
+        assert not app.exception and not app.error
+        assert _reference_card_numbers(app) == list(range(1, 8))
+        assert any('Проверенный разбор · редакция 30.05.2023' in s.value for s in app.success)
+        assert not any(b.label in ('Извлечь процессы', 'Сформировать отчёт') for b in app.button)
+        assert 'process_result' not in app.session_state
+        label = 'Скачать полный отчёт (PDF, 6 страниц)'
+        prepared = {call.args[0]: call.args[1] for call in downloads.call_args_list if call.args}
+        assert sha256(prepared[label]).hexdigest() == PDF_SHA256
+        with ZipFile(BytesIO(prepared['Скачать все материалы ZIP'])) as archive:
+            assert archive.testzip() is None
+            assert archive.read('opportunity-report.pdf') == prepared[label]
+            saved = archive.read('reference-result.json')
+            artifact = restore_reference_result(saved, extract_document(filename, data))
+            assert artifact == app.session_state['reference_result']
+        assert all(b.proto.ignore_rerun for b in app.get('download_button'))
+        assert all(not b.proto.HasField('deferred_file_id') for b in app.get('download_button'))
+        cached = next(iter(app.session_state['opportunity_exports'].values()))
+        technical(app, fragments=True)
+        assert '2.6.' in app.dataframe[0].value['Пункт'].values
+        assert app.text_area[0].value == data.decode()
+        app.run(); app.run()
+        assert next(iter(app.session_state['opportunity_exports'].values())) is cached
+        assert _reference_card_numbers(app) == list(range(1, 8))
+        for mock in (provider, extract, normalize, generate):
+            mock.assert_not_called()
+
+
+@pytest.mark.parametrize('variation', ['foreign_same_name', 'truncated', 'changed_rule', 'changed_edition'])
+def test_similar_or_same_named_document_uses_ordinary_path_without_reference(variation):
+    text = _reference_source().decode()
+    if variation == 'foreign_same_name':
+        text = 'Приказ Росимущества от 11.09.2020 №261. Редакция от 30.05.2023.\n1. Другой текст.'
+    elif variation == 'truncated':
+        text = text[:len(text)//2]
+    elif variation == 'changed_rule':
+        text = text.replace('без проведения торгов', 'по результатам проведения торгов', 1)
+    else:
+        text = text.replace('30.05.2023', '30.05.2024', 1)
+    with patch('streamlit.file_uploader', return_value=_file('source.txt', text.encode())), \
+         patch('govai.llm.OpenAIProvider.__init__', side_effect=AssertionError('No paid call on upload')) as provider:
+        app = AppTest.from_file(str(APP)).run(timeout=15)
+        assert not app.exception
+        assert 'reference_result' not in app.session_state
+        assert any(b.label == 'Извлечь процессы' for b in app.button)
+        assert not _reference_card_numbers(app)
+        assert not any(b.label.startswith('Скачать полный отчёт') for b in app.get('download_button'))
+        provider.assert_not_called()
+
+
+@pytest.mark.parametrize('next_input', ['other', 'broken', 'removed'])
+def test_reference_then_changed_failed_or_removed_upload_hides_previous_result(next_input):
+    current = [_file('source.txt', _reference_source())]
+    with patch('streamlit.file_uploader', side_effect=lambda label, **kw: current[0] if label == 'Выберите документ' else None), \
+         patch('govai.llm.OpenAIProvider.__init__', side_effect=AssertionError('No API on navigation')) as provider:
+        app = AppTest.from_file(str(APP)).run(timeout=15)
+        assert _reference_card_numbers(app) == list(range(1, 8))
+        old_id = app.session_state['reference_result']['artifact_id']
+        current[0] = (_file('source.txt', '1. Другой орган рассматривает другой вопрос.'.encode()) if next_input == 'other'
+                      else _file('broken.pdf', b'broken') if next_input == 'broken' else None)
+        app.run(timeout=15)
+        assert not app.exception
+        assert 'reference_result' not in app.session_state
+        assert not _reference_card_numbers(app)
+        assert not any('Проверенный разбор' in s.value for s in app.success)
+        assert not any(b.label.startswith('Скачать полный отчёт') or b.label == 'Скачать все материалы ZIP'
+                       for b in app.get('download_button'))
+        # Recovery bytes may remain source-bound in the cache, but must not render.
+        assert 'reference-' + old_id in app.session_state['opportunity_exports']
+        if next_input == 'broken':
+            assert app.error and 'Не удалось прочитать PDF' in app.error[0].value
+        if next_input == 'other':
+            assert any(b.label == 'Извлечь процессы' for b in app.button)
+        app.run(timeout=15)
+        assert not _reference_card_numbers(app)
+        provider.assert_not_called()

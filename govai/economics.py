@@ -1,6 +1,6 @@
 """Pure, auditable effect calculations with explicit premises and no budget-saving claim."""
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
 from itertools import combinations
 from typing import Literal
 
@@ -35,6 +35,18 @@ EFFECT_UNITS = {
     'after_elapsed_minutes': 'minutes/process',
 }
 RESOURCE_VERSION = 'resources-1.0'
+PROTOTYPE_METHOD_VERSION = 'prototype-1.0'
+PROTOTYPE_UNITS = {
+    'case_count': 'cases', 'before_minutes': 'minutes/case', 'after_minutes': 'minutes/case',
+    'person_days_min': 'person_days', 'person_days_max': 'person_days',
+    'hours_per_day': 'hours/person_day', 'team_hour_rate': 'RUB/hour',
+    'staff_hour_rate': 'RUB/hour', 'cash_realization': 'share',
+    'variable_cost_per_case': 'RUB/case',
+}
+
+
+def _hours_for_cases(cases, saved_minutes):
+    return cases * saved_minutes / Decimal(60)
 
 
 class Parameter(StrictModel):
@@ -207,12 +219,11 @@ def calculate_effect_scenario(model, scenario: Scenario | dict, *, population='e
                 values['eligible_saved_minutes'] = compute(['before_minutes', 'after_minutes'], lambda before, after: before-after)
                 minutes = ['eligible_saved_minutes'] + (['applicability'] if population == 'all_cases' else [])
                 values['saved_minutes'] = compute(minutes, lambda difference, share=Decimal(1): difference*share)
-                to_hours = lambda cases, minutes: cases*minutes/60
-                values['released_hours'] = compute(['case_count', 'saved_minutes'], to_hours)
+                values['released_hours'] = compute(['case_count', 'saved_minutes'], _hours_for_cases)
                 # A unit of comparison, never an observed workload or a substitute
                 # for the unknown case_count. Applicability is already in saved_minutes.
                 values['standardized_basis'] = Decimal(1000)
-                values['standardized_hours'] = compute(['standardized_basis', 'saved_minutes'], to_hours)
+                values['standardized_hours'] = compute(['standardized_basis', 'saved_minutes'], _hours_for_cases)
                 formulas = {'eligible_saved_minutes': ('minutes/eligible_case', 'before_minutes - after_minutes'),
                     'saved_minutes': ('minutes/case', '(before_minutes - after_minutes)' +
                     (' * applicability' if population == 'all_cases' else '')),
@@ -403,6 +414,113 @@ def assess_resources(resources):
                         'Человеко-дни — трудоёмкость, не календарный срок и не подтверждение наличия сотрудников.',
                         'Диапазон — инженерное сценарное допущение для указанного объёма; до решения о запуске нужна проверка разбивки.',
                         'Без ставок и тарифов стоимость внедрения и использования неизвестна, а не равна нулю.']}
+
+
+def calculate_prototype_economics(parameters):
+    """Calculate an individual prototype scenario from explicit, unit-bearing premises.
+
+    No agency workload, salary, rate or cash conversion is supplied by default.
+    A caller must establish the operation, actor, measurement boundaries and any
+    document evidence. This arithmetic never proves that saved capacity reduces
+    spending, nor that costs of industrial deployment have been included.
+    """
+    try:
+        if not isinstance(parameters, dict) or set(parameters) - PROTOTYPE_UNITS.keys():
+            raise ValueError('Unknown prototype parameter')
+        parsed = {name: Parameter.model_validate(value) for name, value in parameters.items()}
+        params = {name: (parsed[name] if name in parsed else Parameter(
+            value=None, origin='unknown', unit=unit,
+            note='Нужен замер или отдельно обоснованная предпосылка для этой операции.', evidence_refs=[]))
+            for name, unit in PROTOTYPE_UNITS.items()}
+        for name, p in params.items():
+            if p.unit != PROTOTYPE_UNITS[name]:
+                raise ValueError('Wrong prototype unit')
+        values = {name: Decimal(p.value) if p.value is not None else None for name, p in params.items()}
+        cash = values['cash_realization']
+        if cash is not None and not Decimal(0) <= cash <= Decimal(1):
+            raise ValueError('Cash realization must lie in [0,1]')
+        hours = values['hours_per_day']
+        if hours is not None and not Decimal(0) < hours <= Decimal(24):
+            raise ValueError('A person-day must contain positive hours, at most 24')
+        lower, upper = values['person_days_min'], values['person_days_max']
+        if lower is not None and upper is not None and lower > upper:
+            raise ValueError('Reversed resource range')
+
+        # Derived values use unrounded Decimal operands. Presentation rounding
+        # must never become an operand of a second monetary calculation.
+        formulas = {
+            'saved_minutes': ('minutes/case', ('before_minutes', 'after_minutes'),
+                'before_minutes - after_minutes', lambda b, a: b-a),
+            'saved_hours': ('hours', ('case_count', 'before_minutes', 'after_minutes'),
+                'case_count * (before_minutes - after_minutes) / 60', lambda n, b, a: _hours_for_cases(n, b-a)),
+            'prototype_cost_min': ('RUB', ('person_days_min', 'hours_per_day', 'team_hour_rate'),
+                'person_days_min * hours_per_day * team_hour_rate', lambda d, h, r: d*h*r),
+            'prototype_cost_max': ('RUB', ('person_days_max', 'hours_per_day', 'team_hour_rate'),
+                'person_days_max * hours_per_day * team_hour_rate', lambda d, h, r: d*h*r),
+            'capacity_equivalent_per_case': ('RUB/case', ('before_minutes', 'after_minutes', 'staff_hour_rate'),
+                '(before_minutes - after_minutes) / 60 * staff_hour_rate', lambda b, a, r: _hours_for_cases(Decimal(1), b-a)*r),
+            'net_value_per_case': ('RUB/case', ('before_minutes', 'after_minutes', 'staff_hour_rate', 'cash_realization', 'variable_cost_per_case'),
+                '(before_minutes - after_minutes) / 60 * staff_hour_rate * cash_realization - variable_cost_per_case',
+                lambda b, a, r, cash, cost: _hours_for_cases(Decimal(1), b-a)*r*cash-cost),
+            'net_value_for_cases': ('RUB', ('case_count', 'before_minutes', 'after_minutes', 'staff_hour_rate', 'cash_realization', 'variable_cost_per_case'),
+                'case_count * ((before_minutes - after_minutes) / 60 * staff_hour_rate * cash_realization - variable_cost_per_case)',
+                lambda n, b, a, r, cash, cost: n*(_hours_for_cases(Decimal(1), b-a)*r*cash-cost)),
+        }
+        results = {}
+        with localcontext() as context:
+            context.prec, context.rounding = 120, ROUND_HALF_EVEN
+
+            def result(value, unit, names, formula):
+                origins = list(dict.fromkeys(params[name].origin for name in names))
+                rounded = value.quantize(Decimal('0.01')) if value is not None else None
+                return {'value': None if rounded is None else format(abs(rounded) if rounded == 0 else rounded, 'f'),
+                    'exact_value': None if value is None else format(value, 'f'), 'unit': unit, 'formula': formula,
+                    'input_parameters': list(names), 'parameter_origins': origins,
+                    'status': 'needs_data' if value is None else 'illustrative' if 'illustrative' in origins else 'conditional_estimate'}
+
+            for name, (unit, names, formula, fn) in formulas.items():
+                value = fn(*(values[n] for n in names)) if all(values[n] is not None for n in names) else None
+                values[name] = value
+                results[name] = result(value, unit, names, formula)
+
+            net = values['net_value_per_case']
+            for bound in ('min', 'max'):
+                cost_name = 'prototype_cost_' + bound
+                names = (*formulas[cost_name][1], *formulas['net_value_per_case'][1])
+                cost = values[cost_name]
+                threshold = cost/net if cost is not None and net is not None and net > 0 else None
+                entry = result(threshold, 'cases', names, cost_name + ' / net_value_per_case; net_value_per_case > 0')
+                entry['minimum_whole_cases'] = (str(threshold.to_integral_value(rounding=ROUND_CEILING))
+                                                 if threshold is not None else None)
+                entry['reason'] = ('Неизвестны затраты прототипа или чистый эффект одного случая.'
+                    if cost is None or net is None else
+                    'Чистый эффект одного случая неположителен; положительного порога покрытия затрат нет.'
+                    if net <= 0 else
+                    'Условный порог для отдельного прототипа при заданной реализации денежного эффекта; не прогноз окупаемости внедрения.')
+                results['threshold_cases_' + bound] = entry
+
+        missing = [name for name, p in params.items() if p.value is None]
+        illustrative = any(p.origin == 'illustrative' for p in params.values())
+        warnings = [
+            'Время после включает проверку и исправления человеком; нормативный срок не является рабочим временем.',
+            'Число случаев — указанная база расчёта, не автоматически годовой поток; применимость повторно не умножается.',
+            'Высвобождённые часы и их денежный эквивалент не доказывают сокращение расходов. cash_realization — отдельная предпосылка.',
+            'Затраты относятся только к указанному отдельному прототипу; неизвестные интеграции, сопровождение и промышленное внедрение не приняты за ноль.',
+            'Эффекты и общие работы нескольких инициатив не суммируются без проверки пересечений.',
+        ]
+        if values['saved_minutes'] is not None and values['saved_minutes'] < 0:
+            warnings.append('Рабочее время увеличивается; отрицательный эффект сохранён.')
+        if net is not None and net <= 0:
+            warnings.append('Чистый денежный эффект неположителен; порог покрытия затрат не рассчитан.')
+        return {'method_version': PROTOTYPE_METHOD_VERSION,
+            'status': 'needs_data' if missing else 'illustrative' if illustrative else 'conditional_estimate',
+            'parameters': {name: value.model_dump() for name, value in params.items()},
+            'missing_parameters': missing, 'results': results, 'budget_savings': None,
+            'budget_savings_reason': 'Условная денежная реализация времени не доказывает фактическое сокращение расходов.',
+            'rounding': {'display': '0.01, ROUND_HALF_EVEN', 'whole_case_threshold': 'ROUND_CEILING of unrounded threshold'},
+            'warnings': warnings}
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        raise ProcessError('Некорректные параметры прототипа: проверьте единицы, происхождение, диапазон ресурсов и долю денежной реализации.') from exc
 
 
 def portfolio_assessment(initiatives, relationships, *, incomplete_input=False):

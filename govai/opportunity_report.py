@@ -277,7 +277,11 @@ def economic_summary(initiative):
 
 
 def _pilot_candidates(initiatives):
-    # A short discussion agenda, not a ranking within the qualitative category.
+    # Current plans carry a validated comparative queue. Older plans retain the
+    # previous conservative selection without pretending to have new ranking data.
+    if any(a.get('priority') for a in initiatives):
+        return [a for a in initiatives if a.get('priority', {}).get('queue') == 'first'
+                and a['prospect']['category'] == 'high' and not a['prospect'].get('assessment_issues')][:3]
     return [a for a in initiatives if a['prospect']['category'] == 'high'][:3]
 
 
@@ -549,8 +553,63 @@ def _priority_groups(rows, initiatives, outcome):
     return groups
 
 
+def prospect_condition(initiative):
+    return initiative.get('prospect', {}).get('change_condition', '')
+
+
+def _short_resources(initiative):
+    resources = initiative.get('resources') or {}; effort = resources.get('effort') or {}
+    if resources.get('status') == 'illustrative' and effort.get('min') is not None and effort.get('max') is not None:
+        return (_number(effort['min']).removesuffix(',00') + '–' + _number(effort['max']).removesuffix(',00') +
+                ' человеко-дней. Сценарная оценка отдельного прототипа, не календарный срок.')
+    dependencies = resources.get('dependencies') or []
+    return ('Ресурс пока не оценён. ' + (business_text(dependencies[0]) if dependencies else
+            'Нужно определить объём подготовки материалов и участия предметного специалиста.'))
+
+
+def _process_groups_view(report, ranks):
+    """Display every verified group; do not promote context records into operations."""
+    process_map = report.get('process_map') or {}
+    evidence = process_map.get('evidence') or {}
+    groups = []
+    for group in process_map.get('groups', []):
+        actions = group.get('actions', [])
+        operations = [action for action in actions if action.get('kind') in ('operation', 'review')]
+        participants, outputs, inputs = [], [], []
+        for action in operations:
+            actors = action.get('actors') or []
+            for actor in actors:
+                text = actor.get('value') if isinstance(actor, dict) else actor
+                if text and text not in participants: participants.append(text)
+            for entry in action.get('inputs') or []:
+                text = entry.get('value') if isinstance(entry, dict) else entry
+                if text and text not in inputs: inputs.append(text)
+            for output in action.get('outputs') or []:
+                text = output.get('value') if isinstance(output, dict) else output
+                if text and text not in outputs: outputs.append(text)
+        refs = group.get('evidence_refs') or []
+        clauses = list(dict.fromkeys(str(evidence[ref]['clause_number']) for ref in refs
+                                    if ref in evidence and evidence[ref].get('clause_number')))
+        linked = [ranks[key] for key in group.get('initiative_ids', []) if key in ranks]
+        groups.append({'id': group['id'], 'title': business_text(group['title']),
+            'summary': business_text(group.get('summary') or ''), 'lane': group.get('lane'),
+            'operations': [business_text(action['title']) for action in operations],
+            'participants': [business_text(text) for text in participants],
+            'inputs': [business_text(text) for text in inputs],
+            'results': [business_text(text) for text in outputs], 'initiative_numbers': linked,
+            'non_ai_reasons': [business_text(text) for text in group.get('non_ai_reasons', [])],
+            'clauses': 'пп. ' + ', '.join(clauses) if clauses else 'Пункт не определён; источники сохранены в подробных материалах.',
+            'issues': list(dict.fromkeys(business_text(text) for text in group.get('classification_issues', []))),
+            'requires_review': bool(group.get('classification_issues') or group.get('lane') == 'review'),
+            'context_records': len(actions) - len(operations)})
+    return groups
+
+
 def management_view(artifact):
     """One decision-oriented view; source facts, IDs and original artifacts stay intact."""
+    if artifact.get('kind') == 'govai_verified_reference':
+        from govai.reference import reference_view
+        return reference_view(artifact)
     report = _report(artifact); initiatives = report['initiatives']; details = report['document']
     outcome = report_outcome(artifact)
     ready = outcome['state'] in ('ready', 'partial')
@@ -566,7 +625,7 @@ def management_view(artifact):
     rows = []
     for initiative in initiatives:
         p = initiative.get('presentation', {}); prospect = initiative['prospect']
-        rows.append({'id': initiative['id'], 'number': initiative['sequence_number'],
+        rows.append({'id': initiative['id'], 'number': initiative.get('rank', initiative['sequence_number']),
                      'title': business_text(p.get('short_title') or initiative['title']),
                      'category': prospect['category'], 'category_label': categories[prospect['category']],
                      'benefit': business_text(p.get('expected_effect_short') or initiative['expected_effect']),
@@ -626,10 +685,14 @@ def management_view(artifact):
         pilots.append({'number': row['number'], 'title': row['title'], 'category': row['category'],
             'category_label': row['category_label'], 'narrative': narrative,
             'flow': [business_text(step) for step in flow] if 3 <= len(flow) <= 5 else [],
-            'reason': business_text(p.get('ordering_reason') or initiative['prospect']['reason']),
+            'reason': business_text(initiative.get('priority', {}).get('reason') or p.get('ordering_reason') or initiative['prospect']['reason']),
             'effect': business_text(effect), 'resources': _resource_summary(initiative),
             'check': _pilot_check(initiative),
-            'condition': row['condition'] + ' ' + business_text(initiative['risks'][0]), 'clauses': row['clauses']})
+            'condition': row['condition'] + ' ' + business_text(initiative['risks'][0]), 'clauses': row['clauses'],
+            'input_materials': [business_text(value) for value in initiative.get('input_materials', [])],
+            'ai_work': business_text(initiative['ai_role']), 'staff_result': business_text(initiative.get('staff_result', '')),
+            'human_role': business_text(initiative['human_role']),
+            'change_condition': business_text(initiative.get('priority', {}).get('change_condition') or prospect_condition(initiative))})
     conditions = [
         'Использовать разрешённые материалы и экспертные контрольные ответы. Установить доступы и порядок обработки персональных данных до проверки.',
         'Продолжать работу, если результат лучше обычного способа по указанному показателю и не добавляет критических ошибок. Если правила или шаблоны дают сопоставимый результат, предпочесть их.',
@@ -664,7 +727,31 @@ def management_view(artifact):
     ordering_note = ('Номер обозначает условную очередь проработки. ' + business_text(presentation['ordering_basis'])
                      if presentation.get('origin') == 'editorial' and presentation.get('ordering_basis') else
                      'Номер обозначает условную очередь проработки. Внутри группы сохранён порядок; сопоставимых данных о пользе и затратах для объективного ранжирования может не быть.')
-    return {'title': heading, 'outcome': outcome, 'conclusion': {'heading': heading, 'text': conclusion},
+    if any(item.get('priority', {}).get('origin') == 'model_comparison_checked' for item in initiatives) and not (presentation.get('origin') == 'editorial' and presentation.get('ordering_basis')):
+        ordering_note = ('Очередь предварительная: она сопоставляет ожидаемую пользу, ресурсы, доступность материалов, '
+                         'зависимости и последствия ошибки. Причины места и условия пересмотра указаны у каждой доработки; '
+                         'категория перспективности не означает готовность внедрения или окупаемость.')
+    cards = []
+    by_number = {item['id']: item['sequence_number'] for item in initiatives}
+    for initiative in initiatives:
+        row = by_id[initiative['id']]; p = initiative.get('presentation') or {}; priority = initiative.get('priority') or {}
+        dependencies = [f'№ {by_number[key]}' if key in by_number else 'Зависимая доработка не прошла проверку'
+                        for key in priority.get('dependencies', [])]
+        process_titles = list(dict.fromkeys(g['process_title'] for g in initiative.get('grounding', []) if g.get('process_title')))
+        cards.append({**row, 'rank': row['number'], 'process': '; '.join(business_text(value) for value in process_titles),
+            'description': business_text(p.get('business_summary') or initiative['ai_role'] + ' ' + initiative['human_role']),
+            'input_materials': [business_text(value) for value in initiative.get('input_materials', [])],
+            'ai_work': business_text(initiative['ai_role']), 'staff_result': business_text(initiative.get('staff_result', '')),
+            'human_role': business_text(initiative['human_role']),
+            'effect': business_text(economic_summary(initiative)) if initiative['economics']['scenarios'] else row['benefit'],
+            'resources': _short_resources(initiative),
+            'priority_reason': business_text(priority.get('reason') or p.get('ordering_reason') or initiative['prospect']['reason']),
+            'dependencies': dependencies, 'change_condition': business_text(priority.get('change_condition') or prospect_condition(initiative)),
+            'queue': priority.get('queue', 'first' if row['category'] == 'high' and ready else 'reserve')})
+    process_groups = _process_groups_view(report, by_number)
+    return {'title': heading, 'summary_heading': heading, 'summary_intro': conclusion,
+            'outcome': outcome, 'conclusion': {'heading': heading, 'text': conclusion},
+            'cards': cards, 'process_groups': process_groups,
             'input_limitation': input_limitation,
             'service_map': service_view,
             'highlights': highlights, 'initiatives': rows, 'priority_groups': _priority_groups(rows, initiatives, outcome),
@@ -677,58 +764,135 @@ def management_view(artifact):
             'detail_note': 'Полные цитаты, цепочки источников, расчётные предпосылки и протоколы проверки — в opportunity-details.txt и полном opportunities.json внутри ZIP.'}
 
 
+def management_blocks(view):
+    """Semantic content shared by full exports; the website uses only ``cards``."""
+    yield 'conclusion', view['conclusion']
+    outcome = view.get('outcome', {})
+    if outcome.get('state') in ('partial', 'unfinished'):
+        yield 'notice', {'text': outcome['message'] + ' ' + outcome['action']}
+    rows = view['initiatives']
+    if rows:
+        yield 'heading', 'Общая очередь ИИ-доработок'
+        if view.get('ordering_note'): yield 'paragraph', view['ordering_note']
+        cards = {row['id']: row for row in view.get('cards', [])}
+        for row in rows:
+            card = {**cards.get(row['id'], {}), **row}
+            yield 'ranked_card', card
+    if view.get('process_groups'):
+        yield 'heading', 'Карта процессов'
+        yield 'paragraph', 'Ниже — группы процессов и их связь с доработками. Общие требования отделены от операций; спорные границы отмечены.'
+        for group in view['process_groups']:
+            yield 'process_group', group
+    if view.get('service_map'):
+        yield 'heading', 'Как проходит услуга'
+        yield 'paragraph', view['service_map']['scope']
+        for stage in view['service_map']['stages']:
+            yield 'process_group', {'title': stage['stage'], 'summary': '', 'operations': [],
+                'participants': [stage['participant']], 'results': [stage['result']],
+                'initiative_numbers': [], 'non_ai_reasons': [], 'clauses': stage['clauses'],
+                'requires_review': False, 'context_records': 0}
+    if view['pilots']:
+        yield 'heading', 'Первые доработки: работа инструмента и проверка'
+        for pilot in view['pilots']: yield 'card', pilot
+    if view['effects']:
+        yield 'heading', 'Эффект и границы расчёта'
+        for effect in view['effects']:
+            yield 'subheading', f"№ {effect['number']}. {effect['title']}"
+            yield 'notice', {'text': effect['notice']}
+            yield 'paragraph', effect['boundary']
+            yield 'table', {'headers': effect['headers'], 'rows': effect['rows']}
+            yield 'paragraph', effect['formula']
+    if rows and view.get('effect_note'): yield 'paragraph', view['effect_note']
+    yield 'heading', 'Условия и основания'
+    if rows:
+        yield 'paragraph', ('Высокая перспективность — конкретный ограниченный пилот с измеримой пользой и управляемыми рисками. '
+                            'Средняя — сначала нужно выполнить существенное условие. Низкая — добавочная польза пока уступает сложности или рискам. '
+                            'Недостаточно оснований — механизм или допустимая проверка ещё не определены.')
+    for condition in view['conditions']: yield 'bullet', condition
+    for source in view['source_index']:
+        yield 'source', f"№ {source['number']} — {source['clauses']}"
+    yield 'paragraph', view['detail_note']
+    yield 'requisites', view['requisites']
+    if view.get('scope'): yield 'paragraph', view['scope']
+
+
+def _block_paragraphs(kind, value):
+    """Complete prose for structured cards; no character-based shortening."""
+    if kind == 'ranked_card':
+        yield f"№ {value['number']}. {value['title']}"
+        if value.get('category_label'): yield value['category_label']
+        if value.get('queue'): yield 'В первую очередь' if value['queue'] == 'first' else 'Резерв: сначала выполнить условия'
+        if value.get('description'): yield value['description']
+        if value.get('benefit'): yield 'Ожидаемая польза: ' + value['benefit']
+        if value.get('effect') and value['effect'] != value.get('benefit'): yield value['effect']
+        if value.get('resources'): yield value['resources']
+        if value.get('priority_reason'): yield 'Почему это место: ' + value['priority_reason']
+        if value.get('dependencies'): yield 'Зависит от: ' + ', '.join(value['dependencies']) + '.'
+        if value.get('condition'): yield 'Условие: ' + value['condition']
+    elif kind == 'process_group':
+        yield value['title']
+        if value.get('summary'): yield value['summary']
+        if value.get('requires_review'):
+            yield 'Границы этой группы требуют проверки; это не подтверждённый самостоятельный бизнес-процесс.'
+        for issue in value.get('issues', []):
+            if issue: yield 'Нужно уточнить: ' + issue
+        if value.get('inputs'): yield 'Вход: ' + '; '.join(value['inputs'])
+        if value.get('operations'): yield 'Действия: ' + '; '.join(value['operations']) + '.'
+        if value.get('participants'): yield 'Участники: ' + '; '.join(value['participants'])
+        else: yield 'Распределение исполнителей нужно уточнить по исходному документу.'
+        if value.get('results'): yield 'Результат: ' + '; '.join(value['results'])
+        if value.get('initiative_numbers'):
+            yield 'Связанные доработки: ' + ', '.join('№ ' + str(number) for number in value['initiative_numbers']) + '.'
+        for reason in value.get('non_ai_reasons', []): yield reason
+        if value.get('context_records'):
+            yield 'Общие требования и контекст сохранены отдельно от операций в подробных материалах.'
+        yield 'Основание: ' + value['clauses']
+    elif kind == 'card':
+        yield f"№ {value['number']}. {value['title']}"
+        if value.get('input_materials'): yield 'Входные материалы: ' + '; '.join(value['input_materials'])
+        yield value['narrative']
+        if value.get('staff_result'): yield 'Результат для сотрудника: ' + value['staff_result']
+        if value.get('flow'): yield 'Предлагаемая работа: ' + ' → '.join(value['flow'])
+        yield value['effect']
+        yield value['resources']
+        yield 'Почему раньше других: ' + value['reason']
+        yield value['check']
+        if value.get('change_condition'): yield 'Очередь изменится, если: ' + value['change_condition']
+        if value.get('condition'): yield 'Условие: ' + value['condition']
+        yield 'Основание: ' + value['clauses']
+
+
 def render_markdown(artifact, *, view=None):
-    """One decision-oriented management text; full evidence remains separate."""
+    """Full readable report from the same semantic blocks as PDF and DOCX."""
+    if artifact.get('kind') == 'govai_verified_reference':
+        from govai.reference import reference_markdown
+        return reference_markdown(artifact)
     v = management_view(artifact) if view is None else view
-    lines = ['# ' + _safe(v['conclusion']['heading']), '', _safe(v['conclusion']['text']), '']
-    if v['outcome']['state'] == 'partial':
-        lines += ['> ' + _safe(v['outcome']['message'] + ' ' + v['outcome']['action']), '']
-    for highlight in v['highlights']:
-        lines += ['**' + _safe(highlight['value'] + ' ' + highlight['label']) + '** — ' +
-                  _safe(highlight['basis'] + '. ' + highlight['status'] + '; № ' + str(highlight['number']) + '. ' + highlight['note']), '']
-    if v.get('service_map'):
-        lines += ['## Как проходит услуга', '', _safe(v['service_map']['scope']), '',
-                  '| Этап | Участник | Результат |', '| --- | --- | --- |']
-        for stage in v['service_map']['stages']:
-            lines += ['| ' + ' | '.join(_safe(value) for value in
-                      (stage['stage'] + ' · ' + stage['clauses'], stage['participant'], stage['result'])) + ' |']
-        lines += ['']
-    for group in v['priority_groups']:
-        lines += ['## ' + _safe(group['title']), '', _safe(group['explanation']), '',
-                  '| № и инициатива | Ожидаемая польза | Условие |', '| --- | --- | --- |']
-        for row in group['items']:
-            lines += ['| ' + ' | '.join(_safe(value) for value in (f"№ {row['number']}. {row['title']} · {row['category_label']}",row['benefit'],row['condition'])) + ' |']
-        lines += ['']
-    if v['initiatives']:
-        lines += [_safe(v['ordering_note']), '']
-    if v['pilots']:
-        lines += ['## Первые проверки', '']
-    for pilot in v['pilots']:
-        lines += ['### ' + _safe(f"№ {pilot['number']}. {pilot['title']}"), '', _safe(pilot['narrative']), '']
-        if pilot['flow']:
-            lines += ['Предлагаемая работа: ' + ' → '.join(_safe(step) for step in pilot['flow']), '']
-        lines += [_safe(pilot['reason']), '', _safe(pilot['effect']), '', _safe(pilot['resources']), '',
-                  _safe(pilot['check']), '', '**Условие:** ' + _safe(pilot['condition']), '', 'Основание: ' + _safe(pilot['clauses']), '']
-    if v['effects']:
-        lines += ['## Эффект и границы расчёта', '']
-    for effect in v['effects']:
-        lines += ['### ' + _safe(f"№ {effect['number']}. {effect['title']}"), '', _safe(effect['boundary']), '',
-                  '**' + _safe(effect['notice']) + '**', '',
-                  '| ' + ' | '.join(_safe(cell) for cell in effect['headers']) + ' |',
-                  '| ' + ' | '.join('---' for _ in effect['headers']) + ' |']
-        lines += ['| ' + ' | '.join(_safe(cell) for cell in row) + ' |' for row in effect['rows']]
-        lines += ['', _safe(effect['formula']), '']
-    if v['initiatives']:
-        lines += [_safe(v['effect_note']), '', '## Условия продолжения', '']
-    lines += ['- ' + _safe(condition) for condition in v['conditions']]
-    lines += ['', '## Основания', '', _safe(v['requisites']), '', _safe(v['scope']), '']
-    lines += ['- № ' + str(source['number']) + ' → ' + _safe(source['clauses']) for source in v['source_index']]
-    lines += ['', _safe(v['detail_note'])]
-    return '\n'.join(lines)
+    lines = []
+    for kind, value in management_blocks(v):
+        if kind == 'conclusion':
+            lines += ['# ' + _safe(value['heading']), '', _safe(value['text']), '']
+        elif kind in ('heading', 'subheading'):
+            lines += [('## ' if kind == 'heading' else '### ') + _safe(value), '']
+        elif kind in ('ranked_card', 'process_group', 'card'):
+            paragraphs = list(_block_paragraphs(kind, value))
+            lines += ['### ' + _safe(paragraphs[0]), '']
+            for paragraph in paragraphs[1:]: lines += [_safe(paragraph), '']
+        elif kind == 'table':
+            lines += ['| ' + ' | '.join(_safe(x) for x in value['headers']) + ' |',
+                      '| ' + ' | '.join('---' for _ in value['headers']) + ' |']
+            lines += ['| ' + ' | '.join(_safe(x) for x in row) + ' |' for row in value['rows']]
+            lines += ['']
+        elif kind == 'notice': lines += ['> ' + _safe(value['text']), '']
+        else: lines += [('− ' if kind == 'bullet' else '') + _safe(value), '']
+    return '\n'.join(lines).rstrip()
 
 
 def render_details(artifact):
     """Complete readable technical appendix: exact proofs are deduplicated, not cut."""
+    if artifact.get('kind') == 'govai_verified_reference':
+        from govai.reference import reference_details
+        return reference_details(artifact)
     report = _report(artifact)
     lines = ['# Подробные материалы к управленческому отчёту', '',
              'Этот файл дополняет краткий отчёт. Он не заменяет полноценный opportunities.json для восстановления.', '',
@@ -810,8 +974,18 @@ def render_details(artifact):
             lines += ['- ' + _safe(stage['stage'] + ': ' + stage['participant'] + ' → ' + stage['result']) +
                       ' — ' + _safe(', '.join(stage['evidence_refs']))]
         lines += ['']
+    process_map = report.get('process_map') or {}
+    if process_map:
+        lines += ['## Полная карта исходных процессов', '']
+        for group in process_map.get('groups', []):
+            lines += ['### ' + _safe(group['title']), '', 'ID группы: ' + _safe(group['id']), '',
+                      _safe(group.get('summary') or ''), '',
+                      'Связанные инициативы: ' + _safe(', '.join(group.get('initiative_ids', []))), '']
+            for action in group.get('actions', []):
+                lines += ['- ' + _safe(str(action))]
+            lines += ['']
     lines += ['## Полные подтверждающие фрагменты', '']
-    proofs = {**report['evidence'], **(service_map['evidence'] if service_map else {})}
+    proofs = {**report['evidence'], **(service_map['evidence'] if service_map else {}), **process_map.get('evidence', {})}
     for reference, proof in proofs.items():
         lines += ['### ' + _safe(reference), '',
                   'Пункт ' + _safe(proof.get('clause_number') or 'не определён') +
