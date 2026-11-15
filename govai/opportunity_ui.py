@@ -12,7 +12,8 @@ from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids,
                                  export_opportunity_plan, restore_opportunity_plan)
-from govai.opportunity_report import business_text, economic_summary, render_markdown, _safe as escape_text
+from govai.opportunity_report import (business_text, economic_summary, initiative_title,
+                                      render_markdown, _safe as escape_text)
 from govai.processes import ProcessError
 from govai.report_export import render_docx, render_bundle
 
@@ -168,17 +169,22 @@ def render_opportunities(normalized, analysis):
                    'Они не включены в принятые рекомендации и числовые эффекты; причины сохранены в отчёте.')
     st.caption(f"Инициатив: {len(report['initiatives'])}. Эффекты разных инициатив не суммируются без подтверждения независимости.")
     category = None
-    for a in report['initiatives']:
+    for position, a in enumerate(report['initiatives'], 1):
         prospect = a['prospect']
         if prospect['category'] != category:
             category = prospect['category']
             st.subheader(prospect['label'])
         with st.container(border=True):
-            st.markdown(f"**{escape_text(business_text(a['title']))}**")
+            presentation = a.get('presentation', {})
+            # A genuine legacy report has no persisted presentation number; its
+            # stable qualitative order remains visible without modifying its IDs.
+            title = initiative_title({**a, 'sequence_number': a.get('sequence_number', position)})
+            st.markdown(f"**{escape_text(title)}**")
             st.write(escape_text(business_text(a['ai_role'])))
             st.caption(escape_text(business_text(prospect['reason'])))
             st.caption('Эффект: ' + escape_text(economic_summary(a)))
-            st.caption('Что проверить: ' + escape_text(business_text(prospect['main_uncertainty'])))
+            st.caption('Что проверить: ' + escape_text(business_text(
+                presentation.get('main_condition_short') or prospect['main_uncertainty'])))
     if not report['initiatives']: st.info(report['explanation'])
 
 

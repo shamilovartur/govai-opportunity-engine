@@ -840,7 +840,9 @@ def test_docx_and_bundle_use_same_saved_report_with_cyrillic_and_complete_json()
     assert 'Сверка материалов при исправлении ошибок' in text
     assert 'исправление допущенных' in text and 'об отсутствии опечаток' in text
     assert '\\.' not in text and '##' not in text
-    assert document.tables and len(document.tables[0].columns)==4
+    assert document.tables and len(document.tables[0].columns)==5
+    assert document.tables[0].cell(0,0).text=='№'
+    assert [row.cells[0].text for row in document.tables[0].rows[1:]]==['1','2','3']
     assert document.tables[0].rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
     assert document.sections[0].page_width.cm==pytest.approx(21,abs=.01)
     assert document.sections[0].page_height.cm==pytest.approx(29.7,abs=.01)
@@ -873,7 +875,8 @@ def test_docx_literal_source_markup_long_names_and_bundle_mismatch_are_safe():
     text='\n'.join(p.text for p in document.paragraphs)
     assert '**звёздочками**' in text and '[пример](https://invalid.example)' in text
     assert not document.element.xpath('.//w:hyperlink')
-    assert 'Очень длинное название' in document.tables[0].cell(1,0).text
+    assert document.tables[0].cell(1,0).text=='1'
+    assert 'Очень длинное название' in document.tables[0].cell(1,1).text
     with pytest.raises(ValueError,match='does not describe'):
         render_bundle(saved,json_data=b'{}')
 
@@ -983,3 +986,203 @@ def test_time_scenarios_for_other_metrics_keep_hypothesis_and_other_initiatives(
     assert restore_opportunities(json.dumps(artifact).encode(),normalized,analysis,'test-model')==artifact
     retried=generate_opportunities(normalized,analysis,None,model='test-model',provider_name='openai',saved_plan=pending[0])
     assert retried['report']==report and len(provider.calls)==1
+
+
+def _legacy_opportunity_artifact(normalized, analysis, proposals):
+    """A synthetic artifact in the actual pre-numbering 2.1 format."""
+    from govai.opportunities import assemble_report, canonical_plan, compatibility
+    from govai.analysis_io import digest
+    parsed=canonical_plan(plan(*proposals))
+    identity=compatibility(normalized,'test-model',schema_version='2.1')
+    return {'kind':'govai_opportunities','schema_version':'2.1','report_id':digest(identity),
+        'compatibility':identity,'generated_at':'2026-11-15T12:00:00+00:00','stage_status':'completed',
+        'plan':parsed.model_dump(),'scenario_inputs':{},'report':assemble_report(normalized,analysis,parsed),
+        'metrics':{'elapsed_seconds':10.5,'requests':1,'usage':{'input_tokens':100,'output_tokens':50,'total_tokens':150}}}
+
+
+def _editorial_inputs(initiatives, order):
+    return {'order':order,'ordering_basis':'Редакционная очередь ограниченных пилотов; не балльный рейтинг.',
+        'initiatives':[{'id':row['id'],'short_title':row['title'],
+            'expected_effect_short':'Меньше рабочих минут на проверенный результат.',
+            'main_condition_short':'Подготовленные примеры и экспертная проверка.',
+            'business_summary':'Измерить определённую операцию с проверкой каждого результата человеком.',
+            'ordering_reason':'Ограниченный измеряемый участок позволяет провести проверку до расширения пилота.'}
+            for row in initiatives]}
+
+
+def _individual_completeness_scenarios():
+    """Explicit test premises, supplied locally, never attributed to a model."""
+    return [{'name':name,'parameters':{
+        'before_minutes':{'value':'20','origin':'illustrative','unit':'minutes/case','evidence_refs':[],
+            'note':'Иллюстративные рабочие минуты на чтение и проверку полноты одного комплекта без ИИ.'},
+        'after_minutes':{'value':after,'origin':'illustrative','unit':'minutes/case','evidence_refs':[],
+            'note':'Иллюстративные минуты на проверку таблицы ИИ и исправление её ошибок специалистом.'},
+        'case_count':{'value':'1000','origin':'illustrative','unit':'cases','evidence_refs':[],
+            'note':'Условная база сравнения: подходящие комплекты, не реальная годовая нагрузка.'}}}
+        for name,after in [('conservative','16'),('base','12'),('optimistic','10')]]
+
+
+def test_legacy_report_derives_numbered_individual_effect_and_restores_without_api(monkeypatch):
+    from govai.opportunities import rebuild_opportunities
+    from hashlib import sha256
+    _,_,analysis,normalized=simple_map(
+        ('Исполнитель ведомства проверяет полноту документов.', 'Исполнитель ведомства готовит проект ответа.'),
+        actors=('Исполнитель ведомства','Исполнитель ведомства'),participants=('agency','agency'))
+    proposals=[proposal(normalized,['op-0'],key='checking',title='Проверка документов',economic_model='labor_time'),
+               proposal(normalized,['op-1'],key='drafting',title='Проект ответа',economic_model='labor_time')]
+    original=_legacy_opportunity_artifact(normalized,analysis,proposals)
+    original_bytes=json.dumps(original,ensure_ascii=False).encode()
+    before=deepcopy(original)
+    assert restore_opportunities(original_bytes,normalized,analysis,'test-model')==original
+    def forbidden(*args,**kwargs): raise AssertionError('No provider calls during reassembly or restoration')
+    monkeypatch.setattr(OpportunityMock,'opportunities',forbidden)
+    editorial=_editorial_inputs(original['report']['initiatives'],['checking','drafting'])
+    inputs={'checking':_individual_completeness_scenarios()}
+    result=rebuild_opportunities(original_bytes,normalized,analysis,'test-model',scenario_inputs=inputs,
+        editorial_inputs=editorial,reason='После анализа добавлены согласованные иллюстративные предпосылки только для проверки полноты.')
+    assert original==before and original_bytes==json.dumps(original,ensure_ascii=False).encode()
+    assert result['schema_version']=='2.2' and result['plan']==original['plan']
+    assert result['derivation']['parent_artifact_sha256']==sha256(original_bytes).hexdigest()
+    assert result['derivation']['parent_report_id']==original['report_id']
+    assert result['derivation']['source_generation_metrics']==original['metrics']
+    assert result['metrics']['requests']==0 and result['metrics']['usage'] is None
+    assert result['metrics']['elapsed_seconds']>=0 and result['scenario_inputs']==inputs
+    rows=result['report']['initiatives']
+    assert [row['sequence_number'] for row in rows]==[1,2]
+    assert [row['id'] for row in rows]==['checking','drafting']
+    assert all('score' not in row['prospect'] and 'rank' not in row for row in rows)
+    cases=rows[0]['economics']['scenarios']
+    assert [case['results']['released_hours']['value'] for case in cases]==['66.67','133.33','166.67']
+    assert all(value['origin']=='illustrative' for case in cases for value in case['parameters'].values())
+    assert not rows[1]['economics']['scenarios']
+    assert all(case['budget_savings'] is None for case in cases)
+    assert result['report']['portfolio']['total_budget_savings'] is None
+    for row in rows:
+        prior=next(x for x in before['report']['initiatives'] if x['id']==row['id'])
+        assert row['grounding']==prior['grounding'] and row['measurement']==prior['measurement']
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+
+
+@pytest.mark.parametrize('fault', ['number','effect','source','editorial','derivation','version'])
+def test_numbered_report_restore_rejects_tampering(fault):
+    from govai.opportunities import rebuild_opportunities
+    _,_,analysis,normalized=agency_map()
+    source=_legacy_opportunity_artifact(normalized,analysis,[proposal(normalized,economic_model='labor_time')])
+    derived=rebuild_opportunities(json.dumps(source).encode(),normalized,analysis,'test-model',
+        scenario_inputs={'pilot':_individual_completeness_scenarios()},reason='Локальная иллюстрация на явно указанной условной выборке.')
+    row=derived['report']['initiatives'][0]
+    if fault=='number': row['sequence_number']=2
+    elif fault=='effect': row['economics']['scenarios'][0]['results']['released_hours']['value']='999'
+    elif fault=='source': derived['plan']['proposals'][0]['action_ids']=['invented']
+    elif fault=='editorial': derived['editorial_inputs']={'order':['invented']}
+    elif fault=='derivation': derived['derivation']['parent_artifact_sha256']='0'*64
+    else: derived['schema_version']='2.1'
+    with pytest.raises(ProcessError): restore_opportunities(json.dumps(derived).encode(),normalized,analysis,'test-model')
+
+
+def test_local_reassembly_rejects_foreign_sources_unknown_ids_and_incompatible_document():
+    from govai.opportunities import rebuild_opportunities
+    _,_,analysis,normalized=simple_map(
+        ('Исполнитель ведомства проверяет документы.', 'Исполнитель ведомства готовит проект ответа.'),
+        actors=('Исполнитель ведомства','Исполнитель ведомства'),participants=('agency','agency'))
+    source=_legacy_opportunity_artifact(normalized,analysis,[proposal(normalized,['op-0'],economic_model='labor_time')])
+    data=json.dumps(source).encode(); reason='Согласованные предпосылки для ограниченной проверки на пилоте.'
+    supplied=_individual_completeness_scenarios()
+    supplied[0]['parameters']['before_minutes']['evidence_refs']=normalized['map']['actions'][1]['evidence_refs']
+    with pytest.raises(ProcessError,match='чужое|неизвестное'):
+        rebuild_opportunities(data,normalized,analysis,'test-model',scenario_inputs={'pilot':supplied},reason=reason)
+    with pytest.raises(ProcessError,match='неизвестную'):
+        rebuild_opportunities(data,normalized,analysis,'test-model',scenario_inputs={'invented':[]},reason=reason)
+    editorial=_editorial_inputs(source['report']['initiatives'],['invented'])
+    with pytest.raises(ProcessError):
+        rebuild_opportunities(data,normalized,analysis,'test-model',editorial_inputs=editorial,reason=reason)
+    _,_,other_analysis,other_map=simple_map(('Другое ведомство регистрирует документы по другой процедуре.',))
+    with pytest.raises(ProcessError):
+        rebuild_opportunities(data,other_map,other_analysis,'test-model',reason=reason)
+
+
+def test_original_21_pending_plan_still_rebuilds_without_provider():
+    from govai.opportunities import restore_opportunity_plan
+    _,_,analysis,normalized=agency_map()
+    original=_legacy_opportunity_artifact(normalized,analysis,[proposal(normalized,economic_model='labor_time')])
+    pending={k:deepcopy(original[k]) for k in ('schema_version','compatibility','plan','scenario_inputs','metrics','generated_at')}
+    pending['kind']='govai_opportunity_plan'
+    checked=restore_opportunity_plan(json.dumps(pending).encode(),normalized,analysis,'test-model')
+    assert checked==pending
+    result=generate_opportunities(normalized,analysis,None,model='test-model',provider_name='openai',saved_plan=checked)
+    assert result['schema_version']=='2.2' and result['plan']==original['plan']
+    assert result['report']['initiatives'][0]['sequence_number']==1
+    assert result['metrics']['requests']==original['metrics']['requests']
+
+
+def test_numbering_preserves_categories_and_stable_ties_without_scores():
+    from govai.opportunity_report import number_initiatives
+    rows=[{'id':key,'title':f'Содержательный пилот {key}','prospect':{'category':category}}
+          for key,category in [('medium','medium'),('first','high'),('second','high'),('unknown','insufficient'),('low','low')]]
+    original={'initiatives':rows,'evidence':{'proof':{'quote':'Подтверждённая операция.'}}}
+    before=deepcopy(original)
+    stable=number_initiatives(original)
+    assert [row['id'] for row in stable['initiatives']]==['first','second','medium','low','unknown']
+    assert [row['sequence_number'] for row in stable['initiatives']]==[1,2,3,4,5]
+    assert stable['presentation']['origin']=='stable' and 'исходный порядок' in stable['presentation']['ordering_basis']
+    order=['second','first','medium','low','unknown']
+    editorial=_editorial_inputs(rows,order)
+    revised=number_initiatives(original,editorial)
+    assert [row['id'] for row in revised['initiatives']]==order
+    assert {row['id']:row['prospect'] for row in revised['initiatives']}=={row['id']:row['prospect'] for row in rows}
+    assert revised['presentation']['origin']=='editorial' and original==before
+    assert revised['evidence']==before['evidence']
+    assert 'score' not in json.dumps(revised) and 'rank' not in json.dumps(revised)
+    editorial['order']=['medium','second','first','low','unknown']
+    with pytest.raises(ProcessError,match='категорий'): number_initiatives(original,editorial)
+
+
+def test_local_scenario_wrong_unit_preserves_hypothesis_without_numeric_effect():
+    from govai.opportunities import rebuild_opportunities
+    _,_,analysis,normalized=agency_map()
+    original=_legacy_opportunity_artifact(normalized,analysis,[proposal(normalized,economic_model='labor_time')])
+    inputs=_individual_completeness_scenarios()
+    inputs[0]['parameters']['before_minutes']['unit']='RUB/hour'
+    result=rebuild_opportunities(json.dumps(original).encode(),normalized,analysis,'test-model',
+        scenario_inputs={'pilot':inputs},reason='Явные условные параметры отдельного измеряемого участка; проверка единиц обязательна.')
+    row=result['report']['initiatives'][0]
+    assert row['economics']['status']=='needs_data' and not row['economics']['scenarios']
+    assert row['grounding'] and not result['report']['rejected']
+    assert result['metrics']['requests']==0
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+
+
+def test_compact_effect_and_assumptions_preserve_scope_and_all_distinct_values():
+    from govai.opportunities import rebuild_opportunities
+    from govai.opportunity_report import compact_effect
+    _,_,analysis,normalized=simple_map(
+        ('Исполнитель ведомства проверяет комплектность документов.', 'Исполнитель ведомства готовит проект запроса.'),
+        actors=('Исполнитель ведомства','Исполнитель ведомства'),participants=('agency','agency'))
+    candidate=proposal(normalized,['op-0','op-1'],economic_model='labor_time')
+    candidate['measurement']['source_action_ids']=normalized['map']['actions'][0]['source_action_ids']
+    original=_legacy_opportunity_artifact(normalized,analysis,[candidate])
+    inputs={'pilot':_individual_completeness_scenarios()}
+    editorial=_editorial_inputs(original['report']['initiatives'],['pilot'])
+    editorial['initiatives'][0]['expected_effect_short']='Только сверка комплектности.'
+    saved=rebuild_opportunities(json.dumps(original).encode(),normalized,analysis,'test-model',
+        scenario_inputs=inputs,editorial_inputs=editorial,
+        reason='После анализа добавлена иллюстрация для сверки комплектности, без переноса на другие операции.')
+    before=deepcopy(saved)
+    row=saved['report']['initiatives'][0]
+    assert row['measurement']['partial_initiative']
+    overview=compact_effect(row)
+    assert 'Только сверка комплектности.' in overview and '133,33' in overview
+    markdown=render_markdown(saved)
+    appendix=markdown.split('## Дополнительные расчётные предпосылки',1)[1]
+    assert 'Общие предпосылки для всех сценариев' in appendix
+    before_note=inputs['pilot'][0]['parameters']['before_minutes']['note'].rstrip('.')
+    count_note=inputs['pilot'][0]['parameters']['case_count']['note'].rstrip('.')
+    after_note=inputs['pilot'][0]['parameters']['after_minutes']['note'].rstrip('.')
+    assert appendix.count(before_note)==1 and appendix.count(count_note)==1
+    assert appendix.count(after_note)==3
+    assert '20,00 человеко-минут на случай; Сценарное допущение' in appendix
+    assert '1 000,00 случаев; Сценарное допущение' in appendix
+    for value in ('16,00','12,00','10,00'):
+        assert value+' человеко-минут на случай; Сценарное допущение' in appendix
+    assert saved==before and saved['scenario_inputs']==inputs
+    assert len(row['economics']['scenarios'])==3

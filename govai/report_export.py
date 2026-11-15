@@ -40,7 +40,11 @@ def _table(document, rows):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     table.style = 'Table Grid'
-    widths = [4.7, 4.0, 4.6, 3.7] if count == 4 else [17 / count] * count
+    # The overview deliberately gives its sequential number a narrow column;
+    # short business wording, rather than smaller type, keeps eight rows readable.
+    overview = count == 5 and cells[0][0] == '№'
+    widths = ([0.8, 3.8, 3.3, 4.6, 4.5] if overview else
+              [4.7, 4.0, 4.6, 3.7] if count == 4 else [17 / count] * count)
     for column, width in zip(table.columns, widths):
         column.width = Cm(width)
     for index, row in enumerate(cells):
@@ -48,18 +52,22 @@ def _table(document, rows):
         if index == 0:
             header = OxmlElement('w:tblHeader')
             target._tr.get_or_add_trPr().append(header)
+        if overview:
+            # Overview rows are intentionally compact. Keep each initiative's
+            # condition and effect together when the table crosses a page.
+            target._tr.get_or_add_trPr().append(OxmlElement('w:cantSplit'))
         for cell, value, width in zip(target.cells, row, widths):
             cell.width = Cm(width)
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             paragraph = cell.paragraphs[0]
             _runs(paragraph, value)
             fmt = paragraph.paragraph_format
-            fmt.space_before, fmt.space_after = Pt(2), Pt(4)
+            fmt.space_before, fmt.space_after = (Pt(1), Pt(1)) if overview else (Pt(2), Pt(4))
             fmt.line_spacing = 1.0
             fmt.keep_with_next = False
             fmt.widow_control = True
             for run in paragraph.runs:
-                run.font.size = Pt(9)
+                run.font.size = Pt(9.5)
                 if index == 0:
                     run.bold = True
                     run.font.color.rgb = RGBColor.from_string('243B53')
@@ -141,7 +149,12 @@ def render_docx(artifact):
         elif line.startswith('# '):
             _runs(document.add_paragraph(style='Title'), line[2:])
         elif line.startswith('## '):
-            _runs(document.add_heading(level=1), line[3:])
+            heading = document.add_heading(level=1)
+            _runs(heading, line[3:])
+            # Keep the legal appendix separate. The overview and business cases
+            # flow naturally: a table ending early must not leave an empty page.
+            if line[3:] == 'Приложение с источниками':
+                heading.paragraph_format.page_break_before = True
         elif line.startswith('### '):
             _runs(document.add_heading(level=2), line[4:])
         elif line.startswith('- '):

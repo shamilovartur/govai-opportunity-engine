@@ -490,3 +490,49 @@ def test_busy_fragment_only_polls_session_and_refreshes_after_completion():
         ui._wait_for_report.__wrapped__('identity')
         rerun.assert_called_once_with(scope='app')
         assert info.call_count==1
+
+
+def test_numbered_report_restore_ui_docx_and_bundle_share_order_without_api(monkeypatch):
+    """Small synthetic source plan checks the shared presentation, not LLM quality."""
+    from docx.oxml.ns import qn
+    from govai.opportunity_report import render_markdown, initiative_title, _safe as escape_text
+    a,n,_,_=inputs()
+    saved=generate_opportunities(n,a,OpportunityMock(plan(
+        proposal(n,['register'],key='intake',title='Проверка материалов при приёме'),
+        proposal(n,['reply'],key='answer',title='Подготовка проверенного ответа'))))
+    initiatives=saved['report']['initiatives']
+    assert [i['sequence_number'] for i in initiatives]==[1,2]
+    _,_,_,uploader=inputs(json.dumps(saved).encode(),n)
+    monkeypatch.delenv('OPENAI_API_KEY',raising=False)
+    monkeypatch.delenv('OPENAI_MODEL',raising=False)
+    with patch('streamlit.file_uploader',side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities',side_effect=AssertionError('No generation')), \
+         patch('govai.process_ui.extract_with_checkpoint',side_effect=AssertionError('No extraction')), \
+         patch('govai.map_ui.normalize_analysis',side_effect=AssertionError('No normalization')), \
+         patch('streamlit.download_button',wraps=st.download_button) as download:
+        app=load_saved_processes(AppTest.from_file(str(APP)))
+        button(app,'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        cards=[e.value for e in app.markdown if e.value.startswith('**№ ')]
+        assert cards==[f"**{escape_text(initiative_title(i))}**" for i in initiatives]
+        data={c.args[0]:c.args[1] for c in download.call_args_list if c.args}
+        with ZipFile(BytesIO(data['Скачать все результаты (ZIP)'])) as bundle:
+            assert json.loads(bundle.read('opportunities.json'))==saved
+            assert bundle.read('opportunity-report.docx')==data['Скачать отчёт (DOCX)']
+            assert bundle.read('opportunity-report.md').decode()==render_markdown(saved)
+        doc=Document(BytesIO(data['Скачать отчёт (DOCX)']))
+        table=doc.tables[0]
+        assert [c.text for c in table.rows[0].cells]==[
+            '№','Инициатива','Перспективность','Ожидаемый эффект','Главное условие']
+        assert [r.cells[0].text for r in table.rows[1:]]==['1','2']
+        assert [r.cells[1].text for r in table.rows[1:]]==[i['title'] for i in initiatives]
+        assert table.columns[0].width<table.columns[1].width
+        assert table.rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
+        assert all(r._tr.trPr.find(qn('w:cantSplit')) is not None for r in table.rows)
+        assert min(run.font.size.pt for r in table.rows for c in r.cells
+                   for p in c.paragraphs for run in p.runs if run.font.size)>=9.5
+        appendix=next(p for p in doc.paragraphs if p.text=='Приложение с источниками')
+        assert appendix.paragraph_format.page_break_before
+        app.run()
+        assert not app.exception and not app.error
+        assert next(iter(app.session_state['opportunity_reports'].values()))==saved
