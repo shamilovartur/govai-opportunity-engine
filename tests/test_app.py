@@ -195,3 +195,19 @@ def test_document_requisites_unknown_and_full_title_not_truncated():
     assert not full_title.proto.expanded
     assert 'без проведения торгов' in '\n'.join(x.value for x in full_title.markdown)
     assert '…' not in '\n'.join(x.value for x in full_title.markdown)
+
+
+@pytest.mark.parametrize('message,expected', [
+    ('Превышено время ожидания OpenAI. Повторите попытку позже.', 'не ответил за отведённое время'),
+    ('OpenAI вернул пустой ответ или JSON, не соответствующий схеме.', 'неполный или некорректный ответ'),
+    ('OpenAI вернул незавершённый ответ (возможен лимит вывода).', 'не выдан за готовый результат'),
+    ('OpenAI отклонил запрос. Проверьте поддержку Structured Outputs и размер контекста модели.', 'Владельцу приложения'),
+    ('Карта превышает лимит входа AI-возможностей. Запрос не отправлен, данные не усечены.', 'Запрос не отправлен, данные не сокращены'),
+])
+def test_analysis_service_errors_explain_impact_without_internal_instructions(message, expected):
+    from govai.document_ui import analysis_error_message
+    visible = analysis_error_message(message)
+    assert expected in visible
+    assert all(token not in visible for token in ('JSON', 'Structured Outputs', 'secrets.toml'))
+    integrity = 'Подтверждающая цитата не найдена в указанном фрагменте. Источник отклонён.'
+    assert analysis_error_message(integrity) == integrity
