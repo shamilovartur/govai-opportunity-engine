@@ -28,6 +28,24 @@ def plan(*rows, rejected=None, relationships=None):
                            explanation='Контролируемый тестовый ответ, не реальная генерация.')
 
 
+def presented_plan(*rows, summary=None, rejected=None):
+    """Explicit compact mock wording for the current single-request schema."""
+    from govai.opportunities import OpportunityGenerationPlan
+    proposals=[]
+    for row in rows:
+        row=deepcopy(row)
+        row['presentation']={
+            'short_title':'Помощь в проверке проекта ответа',
+            'expected_effect_short':'Помочь специалисту проверить каждый вывод по документам.',
+            'main_condition_short':'Доступные обезличенные дела и контроль ответственного специалиста.',
+            'business_summary':'ИИ сопоставляет материалы и предлагает проект. Специалист проверяет ссылки, исправляет ошибки и утверждает ответ.',
+            'ordering_reason':'Можно сравнить подготовку проверенного проекта с шаблоном на одинаковых завершённых делах.'}
+        proposals.append(row)
+    return OpportunityGenerationPlan(proposals=proposals,rejected=rejected or [],relationships=[],
+        explanation='Явно заданный тестовый план; он не подтверждает качество настоящей модели.',
+        executive_summary=summary or 'Начать с проверки проекта ответа. Сравнить помощь ИИ с обычным шаблоном на обезличенных завершённых делах. Специалист проверяет каждый вывод; доступность материалов и фактическое время работы пока неизвестны.')
+
+
 def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
     _, raw, a, n = map_case()
     original = json.dumps([raw,n], ensure_ascii=False)
@@ -328,6 +346,26 @@ def test_all_verified_records_and_conditions_remain_visible_losslessly():
     assert set(payload['evidence'])=={e for x in n['map']['actions'] for e in x['retained_evidence_refs']}
     assert all(x['kind'] and 'process_id' in x for x in expanded['actions'])
     assert 'source_diagnostics' not in expanded
+
+
+@pytest.mark.parametrize('fixture,previous_digest,previous_bytes',[
+    ('public_excerpt','536c155c33344cd6b9f1417fee563813fd9d5a681f73e0e2485c60f29effcdfc',21563),
+    ('short_repetitions','d829e4d7a9beab48bb2a7dba7dfa713e858a7bf8360296a0648b8ad3f4438fdf',4821),
+])
+def test_lossless_interning_retains_the_previous_expanded_payload(fixture,previous_digest,previous_bytes):
+    from govai.analysis_io import digest
+    # Digests of the expanded payload before break-even interning: every source,
+    # actor, condition, ID, quote and span must remain identical, not only counts.
+    if fixture=='public_excerpt':_,_,analysis,normalized=map_case(incomplete=True)
+    else:
+        _,_,analysis,normalized=simple_map(('Специалист проверяет документы.',)*6,
+            actors=('Специалист ведомства',)*6,participants=('agency',)*6)
+    original=deepcopy(normalized)
+    payload=compact_input(normalized,analysis)
+    expanded={key:unpack_payload(value,payload) for key,value in payload.items() if key!='texts'}
+    assert digest(expanded)==previous_digest
+    assert len(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode())<previous_bytes
+    assert normalized==original
 
 
 def test_all_operations_can_be_review_only_and_still_generate_qualitative_hypothesis():
@@ -646,7 +684,9 @@ def test_explicit_part_of_disputed_initiative_keeps_measurement_but_unknown_acto
     assert any('участника' in text for text in row['economics']['reasons'])
     assert row['confidence']['requires_review'] and r['report']['portfolio']['total_budget_savings'] is None
     assert 'составление ответа не измеряется' in _read_markdown(render_details(r))
-    assert 'границы и участников' in render_markdown(r) and '133,33' not in render_markdown(r)
+    main=_read_markdown(render_markdown(r))
+    assert 'исполнитель измеряемой работы не установлен' in main
+    assert 'нельзя приписывать это время сотрудникам ведомства' in main and '133,33' not in main
     money=proposal(n,aids)
     monetary=generate_opportunities(n,a,OpportunityMock(plan(money)),scenario_inputs={'pilot':supplied_scenarios()})
     assert monetary['report']['initiatives'][0]['economics']['scenarios']==[]
@@ -1273,8 +1313,9 @@ def test_management_exports_adapt_without_editorial_data_or_dropping_initiatives
         assert row['condition'] in _read_markdown(markdown)
         assert row['id'] in detailed
     if count:
-        if document.tables:
-            table=document.tables[0]
+        catalogue=next((table for table in document.tables if table.rows[0].cells[0].text=='№ и название'),None)
+        if catalogue is not None:
+            table=catalogue
             assert len(table.rows)==count+1
             for row,item in zip(table.rows[1:],view['initiatives']):
                 assert item['title'] in row.cells[0].text
@@ -1345,3 +1386,122 @@ def test_management_effect_keeps_each_scenarios_own_comparison_basis():
     for row,count in zip(effect['rows'],('500','1 000','1 500')):
         assert 'на '+count+' подходящих случаев' in row[-1]
     assert restore_opportunities(json.dumps(saved).encode(),normalized,analysis,'test-model')==saved
+
+
+def test_current_plan_preserves_full_analysis_and_shared_compact_wording_without_editorial_input():
+    from govai.opportunities import OpportunityGenerationPlan
+    _,raw,analysis,normalized=simple_map()
+    source_snapshot=deepcopy([raw,normalized])
+    p=presented_plan(proposal(normalized)); before=p.model_dump()
+    provider=OpportunityMock(p)
+    result=generate_opportunities(normalized,analysis,provider)
+    assert result['schema_version']=='2.3' and result['compatibility']['prompt_version']=='opportunities-2.2'
+    assert result['editorial_inputs']=={} and result['derivation'] is None
+    item=result['report']['initiatives'][0]
+    assert item['presentation']['origin']=='model'
+    for key,value in before['proposals'][0]['presentation'].items():assert item['presentation'][key]==value
+    for key in ('problem','ai_role','human_role','why_ai','non_ai_alternative','conditions','risks','action_ids'):
+        assert item[key]==before['proposals'][0][key]
+    assert result['report']['presentation']['executive_summary']==p.executive_summary
+    assert result['report']['presentation']['ordering_origin']=='stable'
+    assert item['sequence_number']==1 and 'score' not in item['prospect']
+    assert item['economics']['scenarios']==[]
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+    assert [raw,normalized]==source_snapshot and p.model_dump()==before
+    assert len(provider.calls)==1
+    assert isinstance(OpportunityGenerationPlan.model_validate(result['plan']),OpportunityGenerationPlan)
+
+
+def test_current_summary_cannot_recommend_an_initiative_rejected_by_source_validation():
+    _,_,analysis,normalized=simple_map(('Специалист проверяет документы.','Специалист готовит проект ответа.'))
+    good=proposal(normalized,['op-0'],key='valid',title='Проверка материалов')
+    bad=proposal(normalized,['op-1'],key='invalid',title='Подготовка проекта',evidence_refs=['invented'])
+    p=presented_plan(good,bad,summary='Начать с недостоверной рекомендации, которую валидатор должен исключить из управленческого резюме.')
+    result=generate_opportunities(normalized,analysis,OpportunityMock(p))
+    assert [row['id'] for row in result['report']['initiatives']]==['valid']
+    assert result['report']['rejected'][0]['origin']=='integrity_validator'
+    assert 'executive_summary' not in result['report']['presentation']
+    assert p.executive_summary not in render_markdown(result)
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+
+
+def test_current_summary_does_not_overrule_python_reassessment_of_pilot():
+    _,_,analysis,normalized=simple_map()
+    p=presented_plan(proposal(normalized,ai_necessity='uncertain'),
+        summary='Начать этот пилот: предложенная моделью рекомендация ещё не прошла проверку добавочной ценности.')
+    result=generate_opportunities(normalized,analysis,OpportunityMock(p))
+    row=result['report']['initiatives'][0]
+    assert row['prospect']['category']=='insufficient' and row['prospect']['assessment_issues']
+    assert row['presentation']['short_title']==p.proposals[0].presentation.short_title
+    assert 'executive_summary' not in result['report']['presentation']
+    assert p.executive_summary not in render_markdown(result)
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+
+
+def test_current_structured_plan_survives_assembly_failure_and_rebuilds_without_api(monkeypatch):
+    import govai.opportunities as module
+    _,_,analysis,normalized=simple_map()
+    p=presented_plan(proposal(normalized)); provider=OpportunityMock(p); saved=[]
+    original=module.assemble_report
+    def fail(*args,**kwargs):raise ProcessError('Локальная ошибка оформления; план сохранён.')
+    monkeypatch.setattr(module,'assemble_report',fail)
+    with pytest.raises(OpportunityError):generate_opportunities(normalized,analysis,provider,on_plan=saved.append)
+    assert len(provider.calls)==1 and len(saved)==1
+    assert saved[0]['schema_version']=='2.2' and saved[0]['compatibility']['schema_version']=='2.3'
+    backup=module.export_opportunity_plan(saved[0],normalized,analysis,'test-model')
+    checked=module.restore_opportunity_plan(backup,normalized,analysis,'test-model')
+    monkeypatch.setattr(module,'assemble_report',original)
+    result=generate_opportunities(normalized,analysis,None,model='test-model',provider_name='openai',saved_plan=checked)
+    assert len(provider.calls)==1 and result['schema_version']=='2.3'
+    assert result['plan']['executive_summary']==p.executive_summary
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result
+
+
+@pytest.mark.parametrize('fault',['version','prompt','schema','presentation','document'])
+def test_current_and_legacy_contracts_reject_relabelling_or_tampering(fault):
+    _,_,analysis,normalized=simple_map()
+    result=generate_opportunities(normalized,analysis,OpportunityMock(presented_plan(proposal(normalized))))
+    bad=deepcopy(result)
+    if fault=='version':bad['schema_version']='2.2'
+    elif fault=='prompt':bad['compatibility']['prompt_version']='opportunities-2.1'
+    elif fault=='schema':bad['compatibility']['plan_schema_sha256']='0'*64
+    elif fault=='presentation':bad['report']['initiatives'][0]['presentation']['expected_effect_short']='Доказанная экономия миллионов рублей.'
+    else:bad['compatibility']['document_sha256']='0'*64
+    with pytest.raises(ProcessError):restore_opportunities(json.dumps(bad).encode(),normalized,analysis,'test-model')
+
+
+def test_current_plan_local_editorial_rebuild_preserves_model_origin_and_old_source():
+    from govai.opportunities import rebuild_opportunities
+    _,_,analysis,normalized=simple_map()
+    result=generate_opportunities(normalized,analysis,OpportunityMock(presented_plan(proposal(normalized))))
+    encoded=json.dumps(result).encode(); before=deepcopy(result)
+    editorial=_editorial_inputs(result['report']['initiatives'],['pilot'])
+    editorial['executive_summary']='После содержательной проверки предлагается ограниченный пилот на обезличенных делах; решения остаются специалисту.'
+    derived=rebuild_opportunities(encoded,normalized,analysis,'test-model',editorial_inputs=editorial,
+        reason='Явная редакционная проработка сохранённого результата; новые факты и расчёты не добавлялись.')
+    assert derived['schema_version']=='2.3' and derived['plan']==result['plan']
+    assert derived['report']['presentation']['origin']=='editorial'
+    assert derived['report']['presentation']['executive_summary']==editorial['executive_summary']
+    assert derived['derivation']['parent_schema_version']=='2.3'
+    assert derived['metrics']['requests']==0 and result==before
+    assert restore_opportunities(json.dumps(derived).encode(),normalized,analysis,'test-model')==derived
+
+
+def test_known_legacy_plan_schema_hash_is_unchanged():
+    from govai.analysis_io import digest
+    from govai.opportunities import compatibility
+    _,_,analysis,normalized=simple_map()
+    assert digest(OpportunityPlan.model_json_schema())=='e4c72854556d1ab31ee9aa35177b0d407f6f0cff1f1e8c2ad5d7e1438b782625'
+    for version in ('2.1','2.2'):
+        identity=compatibility(normalized,'test-model',schema_version=version)
+        assert identity['prompt_version']=='opportunities-2.1'
+        assert identity['prompt_sha256']=='59c2df4c7e033976e2b953d929a5cffc01d14ac8c04f8bcadcdd84b011c72f06'
+
+
+def test_current_zero_initiatives_remains_a_substantive_result_without_numbers():
+    _,_,analysis,normalized=simple_map()
+    p=presented_plan(summary='Для указанного шага достаточно фиксированного шаблона и проверки обязательных полей. Дополнительная польза ИИ не обоснована.')
+    result=generate_opportunities(normalized,analysis,OpportunityMock(p))
+    assert result['schema_version']=='2.3' and result['report']['initiatives']==[]
+    assert result['report']['presentation']['executive_summary']==p.executive_summary
+    assert restore_opportunities(json.dumps(result).encode(),normalized,analysis,'test-model')==result

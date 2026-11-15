@@ -3,6 +3,7 @@
 import json
 import os
 import ssl
+import time
 from collections.abc import Mapping
 from hashlib import sha256
 
@@ -91,6 +92,8 @@ class OpenAIProvider:
             options['timeout'] = request_timeout
         client = self.client.with_options(**options) if options else self.client
         self.last_usage = None
+        self.last_call_elapsed_seconds = None
+        started = time.perf_counter()
         try:
             response = client.responses.create(
                 model=self.model, instructions=instructions,
@@ -116,6 +119,10 @@ class OpenAIProvider:
                                "Ошибка сервиса OpenAI. Повторите попытку позже.")) from exc
         except APIError as exc:
             raise ProcessError("OpenAI вернул некорректный ответ API. Повторите попытку позже.") from exc
+        finally:
+            # Observed request wall time includes transport and provider waiting;
+            # it is not a claim about the model's internal compute time.
+            self.last_call_elapsed_seconds = time.perf_counter() - started
         usage = getattr(response, 'usage', None)
         tokens = {k: getattr(usage, k) for k in ('input_tokens', 'output_tokens', 'total_tokens')
                   if type(getattr(usage, k, None)) is int and getattr(usage, k) >= 0}
@@ -154,9 +161,9 @@ class OpenAIOpportunityProvider(OpenAIProvider):
     from govai.opportunities import PROMPT_VERSION as prompt_version, PROMPT_SHA256 as prompt_sha256
 
     def opportunities(self, payload, *, max_output_tokens):
-        from govai.opportunities import INSTRUCTIONS as OPPORTUNITY_INSTRUCTIONS, OpportunityPlan
+        from govai.opportunities import INSTRUCTIONS as OPPORTUNITY_INSTRUCTIONS, OpportunityGenerationPlan
         try:
-            return self.structured(payload, instructions=OPPORTUNITY_INSTRUCTIONS, schema=OpportunityPlan,
+            return self.structured(payload, instructions=OPPORTUNITY_INSTRUCTIONS, schema=OpportunityGenerationPlan,
                                    schema_name='ai_opportunities', max_output_tokens=max_output_tokens,
                                    retries=0, compact=True, request_timeout=300)
         except ProcessError as exc:

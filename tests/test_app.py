@@ -34,8 +34,10 @@ def run_with_upload(filename, data):
 def test_initial_screen():
     app = AppTest.from_file(str(APP)).run(timeout=15)
     assert not app.exception
-    assert app.title[0].value == "GovAI Opportunity Engine"
-    assert app.info
+    assert app.title[0].value == 'Найдите возможности для применения ИИ в нормативном акте'
+    assert any('первые кандидаты для пилота' in item.value for item in app.markdown)
+    assert any('PDF с текстом, DOCX или TXT · до 10 МБ' in item.value for item in app.caption)
+    assert any('Скан без распознанного текста' in item.value for item in app.caption)
     assert not app.text_area
 
 
@@ -143,3 +145,53 @@ def test_url_mode_blocks_local_address_without_network():
     assert not app.exception
     assert 'Локальные и внутренние адреса запрещены' in app.error[0].value
     assert not app.text_area
+
+
+def test_file_reading_is_cached_per_file_content_and_encoding():
+    from govai.extraction import extract_document
+    value = UploadedFile(UploadedFileRec('source', 'source.txt', 'text/plain',
+        'Документ с русским текстом.'.encode()), FileURLs())
+    with patch('streamlit.file_uploader', return_value=value), \
+         patch('govai.extraction.extract_document', wraps=extract_document) as read:
+        app = AppTest.from_file(str(APP)).run(timeout=15)
+        assert read.call_count == 1
+        app.run()
+        technical(app)
+        assert read.call_count == 1
+        settings = next(e for e in app.expander if e.label == 'Дополнительные настройки TXT')
+        assert not settings.proto.expanded
+        next(s for s in app.selectbox if s.label == 'Кодировка TXT').set_value('Windows-1251').run()
+        assert read.call_count == 2
+        app.run()
+        assert read.call_count == 2
+    changed = UploadedFile(UploadedFileRec('source', 'source.txt', 'text/plain',
+        'Другой текст того же файла.'.encode()), FileURLs())
+    with patch('streamlit.file_uploader', return_value=changed), \
+         patch('govai.extraction.extract_document', wraps=extract_document) as read:
+        app.run()
+        assert read.call_count == 1
+
+
+def test_corrupt_file_is_not_reparsed_on_navigation():
+    from govai.extraction import extract_document
+    value = UploadedFile(UploadedFileRec('broken', 'broken.pdf', 'application/pdf', b'broken'), FileURLs())
+    with patch('streamlit.file_uploader', return_value=value), \
+         patch('govai.extraction.extract_document', wraps=extract_document) as read:
+        app = AppTest.from_file(str(APP)).run(timeout=15)
+        app.run()
+        assert read.call_count == 1
+        assert 'Попробуйте другую копию PDF' in app.error[0].value
+        assert 'process_result' not in app.session_state
+
+
+def test_document_requisites_unknown_and_full_title_not_truncated():
+    app = run_with_upload('ordinary.txt', 'Простой текст без реквизитов.'.encode())
+    assert any(h.value == 'ordinary.txt' for h in app.subheader)
+    assert not any('не определено №' in h.value for h in app.subheader)
+    assert any('Редакция: не определена' in c.value for c in app.caption)
+    source = APP.parent/'examples/rosimushchestvo_261/source.txt'
+    real = run_with_upload('source.txt', source.read_bytes())
+    full_title = next(e for e in real.expander if e.label == 'Полное название документа')
+    assert not full_title.proto.expanded
+    assert 'без проведения торгов' in '\n'.join(x.value for x in full_title.markdown)
+    assert '…' not in '\n'.join(x.value for x in full_title.markdown)

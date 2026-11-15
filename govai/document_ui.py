@@ -1,25 +1,65 @@
 """Document presentation; heavy source views are rendered only in Technical data."""
 
 import json
+from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
 
+def analysis_error_message(message):
+    """Explain recoverable service/configuration failures to a visitor, not a server operator."""
+    text = str(message)
+    if any(marker in text for marker in ('OPENAI_API_KEY', 'API-ключ', 'secrets.toml')):
+        return ('Сервис анализа не настроен или доступ к модели отклонён. '
+                'Владельцу приложения нужно проверить серверные настройки доступа. '
+                'Загруженный документ сохранён в этой сессии.')
+    if 'OPENAI_MODEL' in text or 'выбранной модели запрещён' in text:
+        return ('Выбранная на сервере модель недоступна. Владельцу приложения нужно '
+                'проверить её настройку и доступ. Сохранённые результаты остаются доступны.')
+    if 'квота OpenAI' in text:
+        return ('Сервис анализа достиг лимита запросов. Сохранённые результаты доступны. '
+                'Повторите попытку позже; владельцу приложения нужно проверить квоту сервиса.')
+    if 'сертификат' in text or 'сетевые настройки сервера' in text:
+        return ('Не удалось соединиться с сервисом анализа. Сохранённые результаты доступны. '
+                'Повторите попытку позже; владельцу приложения нужно проверить соединение сервера.')
+    return text
+
+
+def _date(value):
+    try:
+        return date.fromisoformat(value).strftime('%d.%m.%Y')
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def document_header(document):
     m = document['metadata']
     def value(key):
-        return m[key]['value'] if m.get(key) else 'не определено'
-    st.subheader(f"{value('act_type')} № {value('number')}")
-    st.caption(f"Дата принятия: {value('adoption_date')} · Редакция: {value('revision_date')}")
+        return m[key]['value'] if m.get(key) else None
+    title = value('act_type') or ('Документ' if value('number') else document['source']['filename'])
+    if value('number'):
+        title += ' № ' + str(value('number'))
+    st.subheader(title)
+    adopted = _date(value('adoption_date')) if value('adoption_date') else 'не определена'
+    revision = _date(value('revision_date')) if value('revision_date') else 'не определена'
+    st.caption(f'Дата принятия: {adopted} · Редакция: {revision}')
     if m.get('title'):
         title = ' '.join(m['title']['value'].split())
-        st.caption(title if len(title) <= 180 else title[:177] + '…')
+        if len(title) > 180:
+            with st.expander('Полное название документа', expanded=False):
+                st.write(title)
+        else:
+            st.caption(title)
     if document['source'].get('type') == 'url_html':
-        st.warning('Извлечён основной текст HTML-страницы. Полнота НПА автоматически не подтверждена; '
-                   'сверьте документ с источником. Номера страниц для HTML неизвестны.')
+        st.warning('Прочитан основной текст страницы. Полнота НПА автоматически не подтверждена: '
+                   'сверьте его с документом на сайте. Номера страниц для HTML не определяются.')
     if any(w.startswith('pdf_page_without_text:') for w in document['warnings']):
-        st.warning('На некоторых страницах PDF нет извлекаемого текста. Проверьте оригинал.')
+        st.warning('На некоторых страницах PDF не удалось прочитать текст. Анализ этих страниц '
+                   'может быть неполным. Для полной проверки загрузите копию с распознанным текстом.')
+    if 'docx_automatic_numbering_not_resolved' in document['warnings']:
+        st.caption('Автоматическая нумерация Word может не сохраниться. Проверяйте ссылки '
+                   'по цитатам из исходного документа.')
 
 
 def technical_document(document):

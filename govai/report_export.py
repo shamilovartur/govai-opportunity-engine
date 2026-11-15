@@ -16,27 +16,64 @@ from lxml import etree
 
 from govai.opportunity_report import management_view, render_markdown, render_details
 
-EXPORT_VERSION = 'management-1'
+EXPORT_VERSION = 'management-2'
 _FONT_DIR = Path(__file__).with_name('fonts')
 _FONT_NAME = 'Liberation Sans'
 _UNSET = object()
 _COLORS = {'ink': '283438', 'green': '3F6B57', 'blue': 'EAF0F4', 'light': 'F4F5F4', 'rule': 'D5DDDF'}
 
 
+def _register_pdf_fonts():
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    for name, filename in [('GovAISans', 'LiberationSans-Regular.ttf'), ('GovAISansBold', 'LiberationSans-Bold.ttf')]:
+        if name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(name, str(_FONT_DIR / filename)))
+    pdfmetrics.registerFontFamily('GovAISans', normal='GovAISans', bold='GovAISansBold',
+                                 italic='GovAISans', boldItalic='GovAISansBold')
+
+
+def _compact_catalogue(view):
+    """Use a table only when its actual wrapped text makes a readable one-page block.
+
+    This is a layout decision, never a content budget. Longer rows use the full
+    page width and every initiative, condition and benefit remains present.
+    """
+    try:
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph
+        _register_pdf_fonts()
+        style = ParagraphStyle('catalogue-measure', fontName='GovAISans', fontSize=10.5, leading=12.3)
+        heights = []
+        for row in view['initiatives']:
+            values = [f"№ {row['number']}. {row['title']}", row['category_label'], row['benefit'], row['condition']]
+            heights.append(max(Paragraph(escape(value), style).wrap(width*cm-10, 10000)[1]
+                               for value, width in zip(values, [4.5, 3.7, 4.4, 4.4])) + 11)
+        # Leave room for the section heading, category explanation and table head.
+        return bool(heights) and max(heights) <= 110 and sum(heights) <= 530
+    except (OSError, ImportError, ValueError):
+        # DOCX remains available if the PDF font engine cannot be initialised.
+        return False
+
+
 def _blocks(view):
     """One layout sequence for both document formats, containing only shared wording."""
     count = len(view['initiatives'])
+    compact_catalogue = _compact_catalogue(view) if count else False
     yield ('title', view['title'])
     yield ('requisites', view['requisites'])
     yield ('heading', 'Главное для руководителя')
     for block in view['summary_blocks']:
         yield ('summary', block)
     if count:
-        if count >= 5:
+        if compact_catalogue and count >= 5:
             yield ('page', None)
         yield ('heading', 'Предлагаемые инициативы')
         yield ('paragraph', view.get('ordering_note') or 'Номера обозначают предварительную очередь проверки. Категории не являются оценкой окупаемости.')
-        if count > 12:
+        if view.get('category_note'):
+            yield ('paragraph', view['category_note'])
+        if not compact_catalogue:
             # Long lists need the full text width, not ever narrower table cells.
             # Every title, category, benefit and condition stays visible.
             for initiative in view['initiatives']:
@@ -47,14 +84,12 @@ def _blocks(view):
                                      for a in view['initiatives']],
                             'widths': [4.5, 3.7, 4.4, 4.4]})
     if view['pilots']:
-        if 5 <= count <= 12:
+        if compact_catalogue and count >= 5:
             yield ('page', None)
         yield ('heading', 'С чего начать')
         for pilot in view['pilots']:
             yield ('card', pilot)
     if view['effects']:
-        if 5 <= count <= 12:
-            yield ('page', None)
         yield ('heading', 'Какой эффект можно получить')
         for effect in view['effects']:
             yield ('subheading', f"№ {effect['number']}. {effect['title']}")
@@ -67,8 +102,6 @@ def _blocks(view):
         if not view['effects']:
             yield ('heading', 'Какой эффект можно получить')
         yield ('paragraph', view['effect_note'])
-    if 5 <= count <= 12 and view['effects']:
-        yield ('page', None)
     yield ('heading', 'Условия запуска и основания')
     for condition in view['conditions']:
         yield ('bullet', condition)
@@ -240,14 +273,9 @@ def render_pdf(artifact, *, view=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import cm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+    from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
     view = management_view(artifact) if view is None else view
-    for name, filename in [('GovAISans', 'LiberationSans-Regular.ttf'), ('GovAISansBold', 'LiberationSans-Bold.ttf')]:
-        if name not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont(name, str(_FONT_DIR / filename)))
-    pdfmetrics.registerFontFamily('GovAISans', normal='GovAISans', bold='GovAISansBold', italic='GovAISans', boldItalic='GovAISansBold')
+    _register_pdf_fonts()
     styles = {
         'body': ParagraphStyle('body', fontName='GovAISans', fontSize=11, leading=14, spaceAfter=7,
                                textColor=colors.HexColor('#'+_COLORS['ink']), alignment=TA_LEFT),
@@ -264,9 +292,9 @@ def render_pdf(artifact, *, view=None):
     def paragraph(text, style='body'):
         return Paragraph(escape(str(text)).replace('\n', '<br/>'), styles[style])
     stream = BytesIO()
-    doc = SimpleDocTemplate(stream, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
-                            topMargin=1.8*cm, bottomMargin=1.8*cm, title=view['title'],
-                            author='GovAI Opportunity Engine', subject='Предложения для проверки на пилоте')
+    doc = BaseDocTemplate(stream, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
+                           topMargin=1.8*cm, bottomMargin=1.8*cm, title=view['title'],
+                           author='GovAI Opportunity Engine', subject='Предложения для проверки на пилоте')
     story = []
     for kind, value in _blocks(view):
         if kind == 'page': story.append(PageBreak())
@@ -286,7 +314,8 @@ def render_pdf(artifact, *, view=None):
         elif kind == 'table':
             rows = [[paragraph(cell, 'tablehead' if index == 0 else 'table') for cell in row]
                     for index, row in enumerate([value['headers'], *value['rows']])]
-            table = Table(rows, colWidths=[width*cm for width in value['widths']], repeatRows=1, hAlign='LEFT')
+            table = Table(rows, colWidths=[width*cm for width in value['widths']], repeatRows=1,
+                          splitInRow=1, hAlign='LEFT')
             commands = [('VALIGN',(0,0),(-1,-1),'TOP'), ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#'+_COLORS['blue'])),
                         ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),
                         ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),6),
@@ -302,13 +331,27 @@ def render_pdf(artifact, *, view=None):
         else:
             story.append(paragraph(('• ' if kind == 'bullet' else '')+str(value)))
     def page(canvas, document):
-        if document.page > 6:
-            raise ValueError('Основной отчёт превышает шесть страниц. Сократите редакционные формулировки; исходный результат сохранён.')
         canvas.saveState(); canvas.setFont('GovAISans',10.5); canvas.setFillColor(colors.HexColor('#'+_COLORS['ink']))
         canvas.drawString(2*cm,A4[1]-1.1*cm,'GovAI · Предварительные рекомендации')
         canvas.drawRightString(A4[0]-2*cm,0.9*cm,f'Страница {document.page}');canvas.restoreState()
-    doc.build(story,onFirstPage=page,onLaterPages=page)
+    # Explicit zero frame padding keeps the text and table within the same 17 cm.
+    # The library paginates real block heights; overflow never discards a report.
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height,
+                  leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    doc.addPageTemplates(PageTemplate(id='management', frames=[frame], onPage=page))
+    doc.build(story)
     return stream.getvalue()
+
+
+def pdf_layout_status(pdf_data):
+    """Describe the generated PDF without rebuilding it or changing its contents."""
+    from pypdf import PdfReader
+    pages = len(PdfReader(BytesIO(pdf_data)).pages)
+    exceeded = pages > 6
+    return {'pages': pages, 'brief_limit': 6, 'exceeded': exceeded,
+            'message': (f'В отчёте {pages} страниц. Краткий формат до шести страниц не удалось '
+                        'соблюсти без потери рекомендаций и условий; полный PDF доступен для скачивания.'
+                        if exceeded else None)}
 
 
 def render_bundle(artifact, *, pdf_data=_UNSET, docx_data=_UNSET, markdown_data=_UNSET,
@@ -322,6 +365,14 @@ def render_bundle(artifact, *, pdf_data=_UNSET, docx_data=_UNSET, markdown_data=
     if docx_data is _UNSET: docx_data = render_docx(artifact,view=view)
     if markdown_data is _UNSET: markdown_data = render_markdown(artifact,view=view).encode('utf-8')
     if details_data is _UNSET: details_data = render_details(artifact).encode('utf-8')
+    layout, pdf_unverified = None, False
+    if pdf_data is not None:
+        try:
+            layout = pdf_layout_status(pdf_data)
+        except Exception:
+            # An unreadable PDF must not invalidate the complete structured
+            # result or prevent downloading the other independently prepared files.
+            pdf_data, pdf_unverified = None, True
     candidates={'opportunity-report.pdf':pdf_data,'opportunity-report.docx':docx_data,
                 'opportunity-report.md':markdown_data,'opportunities.json':json_data,
                 'opportunity-details.txt':details_data}
@@ -337,6 +388,8 @@ def render_bundle(artifact, *, pdf_data=_UNSET, docx_data=_UNSET, markdown_data=
         'Для восстановления нужны соответствующие НПА, processes.json и normalized_processes.json, сохранённые отдельно.',
         'Восстановите JSON в техническом разделе приложения. Новые API-запросы не нужны.',
         'Сессия приложения не является постоянным хранилищем; сохраните архив у себя.',
+        *([layout['message']] if layout and layout['exceeded'] else []),
+        *(['PDF не включён: не удалось проверить подготовленный файл. Остальные форматы доступны.'] if pdf_unverified else []),
         *(['ВНИМАНИЕ: не удалось подготовить '+', '.join(missing)+'. Остальные файлы и полный JSON сохранены.'] if missing else []),
     ])+'\n'
     stream=BytesIO()

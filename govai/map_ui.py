@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from uuid import uuid4
 
 import streamlit as st
 
@@ -105,9 +106,22 @@ def map_state(analysis):
     return key, model, provider, st.session_state.setdefault('normalized_maps', {})
 
 
-def normalize_processes(analysis):
+def request_timing(total_seconds, api_wait_seconds):
+    """Split observed wall time, leaving missing/inconsistent instrumentation unknown."""
+    if (type(api_wait_seconds) not in (int, float) or not math.isfinite(api_wait_seconds)
+            or api_wait_seconds < 0 or api_wait_seconds > total_seconds + 0.000001):
+        return {'api_wait_seconds': None, 'local_seconds': None}
+    return {'api_wait_seconds': api_wait_seconds,
+            'local_seconds': max(0.0, total_seconds-api_wait_seconds)}
+
+
+def normalize_processes(analysis, *, timing=None):
     """The existing second stage, called only by an explicit analysis/retry action."""
     key, model, _, maps = map_state(analysis)
+    in_flight = st.session_state.setdefault('normalization_in_flight', {})
+    owner = uuid4().hex
+    if in_flight.setdefault(key, owner) != owner:
+        raise ProcessError('Проверка и объединение этих процессов уже выполняются. Дождитесь результата.')
     provider = None; started = time.perf_counter()
     try:
         prepare_request(analysis)
@@ -127,7 +141,32 @@ def normalize_processes(analysis):
         st.session_state.setdefault('normalization_failures', {})[key] = metrics
         raise
     finally:
-        if provider: provider.close()
+        elapsed = time.perf_counter()-started
+        measured = request_timing(elapsed, getattr(provider, 'last_call_elapsed_seconds', None) if provider else 0.0)
+        metrics = {'elapsed_seconds': elapsed, **measured}
+        st.session_state.setdefault('normalization_run_metrics', {})[key] = metrics
+        if timing is not None:
+            timing.update(normalization_seconds=elapsed,
+                          normalization_api_wait_seconds=measured['api_wait_seconds'],
+                          normalization_local_seconds=measured['local_seconds'])
+        try:
+            if provider: provider.close()
+        finally:
+            if in_flight.get(key) == owner:
+                in_flight.pop(key, None)
+
+
+def _map_downloads(artifact, metadata):
+    """Prepare bytes once for this immutable map; downloads never use deferred callbacks."""
+    cache = st.session_state.setdefault('normalized_downloads', {})
+    key = artifact['normalization_id']
+    cached = cache.get(key)
+    if not cached or cached['artifact'] is not artifact or cached['metadata'] != metadata:
+        cached = {'artifact': artifact, 'metadata': dict(metadata), 'revision': digest(artifact),
+                  'json': json.dumps(artifact, ensure_ascii=False, indent=2).encode('utf-8'),
+                  'markdown': markdown_report(artifact, metadata).encode('utf-8')}
+        cache[key] = cached
+    return cached
 
 
 def render_workspace(analysis, origin, *, technical=False):
@@ -136,8 +175,11 @@ def render_workspace(analysis, origin, *, technical=False):
     artifact = maps.get(key)
     if not technical:
         if artifact:
-            st.success('Процессы готовы.')
             m = artifact['map']
+            if m['status'] == 'completed':
+                st.success('Процессы готовы.')
+            else:
+                st.info('Предварительный список процессов готов.')
             visible = [p for p in m['processes'] if p['id'] != '__review__']
             st.caption(f'Обнаружено процессов: {len(visible)}')
             for p in visible[:8]: st.text('• ' + p['title'])
@@ -145,7 +187,14 @@ def render_workspace(analysis, origin, *, technical=False):
                 with st.expander(f'Все процессы ({len(visible)})'):
                     for p in visible[8:]: st.text('• ' + p['title'])
             if m['status'] != 'completed':
-                st.warning('Часть группировки требует проверки. Ограничения будут учтены в отчёте.')
+                affected = [a for a in m['actions'] if a['kind'] == 'review' or a['review_reasons']]
+                names = list(dict.fromkeys(a['title'] for a in affected))
+                message = ('Для части действий нужно уточнить границы операции и исполнителя '
+                           'до количественной оценки эффекта. Эти действия сохранены; '
+                           'отчёт отметит ограничения соответствующих предложений.')
+                if names:
+                    message += ' Например: ' + '; '.join(names[:3]) + '.'
+                st.warning(message)
             if not visible: st.info('Конкретные процессы не определены. Отчёт объяснит ограничения анализа.')
         return artifact
 
@@ -154,7 +203,8 @@ def render_workspace(analysis, origin, *, technical=False):
     st.write(f"Исходные данные: {len(analysis.raw['procedures'])} групп · {len(analysis.actions)} кандидатов.")
     uploaded = st.file_uploader('Нормализованный normalized_processes.json', type=['json'],
                                max_upload_size=64, key='normalized_upload')
-    if st.button('Восстановить карту', disabled=uploaded is None):
+    busy = key in st.session_state.get('normalization_in_flight', {})
+    if st.button('Восстановить карту', disabled=uploaded is None or busy):
         try:
             maps[key] = restore_normalized(uploaded.getvalue(), analysis, model, provider_name)
             origins[key] = 'imported'
@@ -163,9 +213,15 @@ def render_workspace(analysis, origin, *, technical=False):
         except ProcessError as exc:
             st.error('Восстановление карты: ' + str(exc))
     if artifact:
-        if st.button('Повторить только нормализацию', help='Один новый платный запрос; извлечение не повторяется.'):
+        downloads = _map_downloads(artifact, analysis.raw['metadata'])
+        attempts = st.session_state.setdefault('normalization_retry_attempts', {})
+        retry_key = f"normalize-again-{key}-{downloads['revision']}-{attempts.get(key, 0)}"
+        if st.button('Повторить только нормализацию', key=retry_key, disabled=busy,
+                     help='Один новый платный запрос; извлечение не повторяется.'):
+            # Invalidate queued clicks on this exact button even if the attempt fails.
+            attempts[key] = attempts.get(key, 0) + 1
             try:
-                with st.spinner('Анализ выполняется…'): normalize_processes(analysis)
+                with st.spinner('Проверяем и объединяем процессы…', show_time=True): normalize_processes(analysis)
                 st.rerun()
             except ProcessError as exc: st.error('Не удалось обновить карту: ' + str(exc))
         st.caption('Карта: ' + ('восстановлена без API' if origins.get(key) == 'imported' else 'получена в сессии'))
@@ -175,9 +231,9 @@ def render_workspace(analysis, origin, *, technical=False):
         if st.checkbox('Показать проверенные доказательства и координаты', key='show-normalized-proofs'):
             st.json(artifact['map']['evidence'])
         st.json(artifact['metrics'])
-        st.download_button('Скачать normalized_processes.json', lambda: json.dumps(artifact, ensure_ascii=False, indent=2),
+        st.download_button('Скачать normalized_processes.json', downloads['json'],
                            file_name='normalized_processes.json', mime='application/json', on_click='ignore')
-        st.download_button('Скачать карту Markdown', lambda: markdown_report(artifact, analysis.raw['metadata']),
+        st.download_button('Скачать карту Markdown', downloads['markdown'],
                            file_name='process-map.md', mime='text/markdown', on_click='ignore')
     if key in st.session_state.get('normalization_failures', {}):
         st.caption('Последняя ошибка нормализации'); st.json(st.session_state.normalization_failures[key])

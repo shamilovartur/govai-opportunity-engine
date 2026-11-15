@@ -60,7 +60,7 @@ def test_report_on_main_screen_no_reextract_renormalize_or_navigation_calls(monk
         assert len(app.session_state['opportunity_reports'])==1
         assert all(b.proto.ignore_rerun for b in app.get('download_button'))
         assert any(s.value=='Отчёт готов.' for s in app.success)
-        labels={'Скачать отчёт (PDF)','Скачать все результаты (ZIP)'}
+        labels={'Скачать отчёт PDF','Скачать все материалы ZIP'}
         shown=[b for b in app.get('download_button') if b.label in labels]
         assert {b.label for b in shown}==labels
         assert all(not b.proto.HasField('deferred_file_id') for b in shown)
@@ -69,16 +69,16 @@ def test_report_on_main_screen_no_reextract_renormalize_or_navigation_calls(monk
         saved=next(iter(app.session_state['opportunity_reports'].values()))
         data={c.args[0]:c.args[1] for c in download.call_args_list if c.args and c.args[0] in labels}
         assert all(isinstance(value,bytes) for value in data.values())
-        with ZipFile(BytesIO(data['Скачать все результаты (ZIP)'])) as bundle:
+        with ZipFile(BytesIO(data['Скачать все материалы ZIP'])) as bundle:
             assert json.loads(bundle.read('opportunities.json'))==saved
-            assert bundle.read('opportunity-report.pdf')==data['Скачать отчёт (PDF)']
+            assert bundle.read('opportunity-report.pdf')==data['Скачать отчёт PDF']
             assert Document(BytesIO(bundle.read('opportunity-report.docx'))).paragraphs
             assert set(bundle.namelist())=={'opportunity-report.pdf','opportunity-report.docx','opportunity-report.md',
                 'opportunities.json','opportunity-details.txt','README.txt'}
             from govai.opportunity_report import render_markdown
             assert bundle.read('opportunity-report.md').decode('utf-8')==render_markdown(saved)
         from pypdf import PdfReader
-        assert PdfReader(BytesIO(data['Скачать отчёт (PDF)'])).pages
+        assert PdfReader(BytesIO(data['Скачать отчёт PDF'])).pages
         assert not any(b.label=='Сформировать отчёт' for b in app.button)
         next(c for c in app.checkbox if c.label=='Показать исходный текст и структуру').check().run()
         app.run(); assert UIProvider.count==1
@@ -155,9 +155,12 @@ def test_markdown_failure_keeps_other_formats_and_caches_failed_preparation(monk
             assert not app.exception and UIProvider.count==1
             assert any('Не удалось подготовить: Markdown' in e.value for e in app.warning)
             assert all('private' not in e.value for e in app.warning)
+            cached=next(iter(app.session_state['opportunity_exports'].values()))
+            assert cached['errors'] and cached['errors'][0]['detail'].startswith('private')
+            assert cached['errors'][0]['reason']
             assert any(s.value=='Отчёт готов.' for s in app.success)
             assert any(b.label=='Скачать отчёт (DOCX)' for b in app.get('download_button'))
-            assert any(b.label=='Скачать доступные результаты (ZIP)' for b in app.get('download_button'))
+            assert any(b.label=='Скачать доступные материалы ZIP' for b in app.get('download_button'))
             backup=next(b for b in app.get('download_button') if b.label=='Скачать данные анализа (JSON)')
             assert backup.proto.ignore_rerun
             saved=next(iter(app.session_state['opportunity_reports'].values()))
@@ -194,7 +197,7 @@ def test_json_preparation_failure_keeps_markdown_and_artifact_without_leaking_de
         assert not app.exception and not app.error and UIProvider.count==1
         assert next(iter(app.session_state['opportunity_reports'].values()))==saved
         assert not any(b.label=='Скачать данные анализа (JSON)' for b in app.get('download_button'))
-        assert any(b.label=='Скачать отчёт (PDF)' for b in app.get('download_button'))
+        assert any(b.label=='Скачать отчёт PDF' for b in app.get('download_button'))
 
 
 def test_failure_keeps_map_and_original_downloads(monkeypatch):
@@ -219,7 +222,8 @@ def test_missing_key_is_a_stage_specific_error_without_model_call(monkeypatch):
     with patch('streamlit.file_uploader',side_effect=uploader), patch('streamlit.runtime.secrets.Secrets.to_dict',return_value={}):
         app=load_saved_processes(AppTest.from_file(str(APP)))
         button(app,'Сформировать отчёт').click().run()
-        assert not app.exception and 'OPENAI_API_KEY' in app.error[0].value
+        assert not app.exception and 'Владельцу приложения' in app.error[0].value
+        assert 'OPENAI_API_KEY' not in app.error[0].value and 'secrets.toml' not in app.error[0].value
         assert 'Отчёт не сформирован' in app.error[0].value
         assert next(iter(app.session_state['opportunity_failures'].values()))['requests']==0
 
@@ -243,7 +247,7 @@ def test_review_only_map_creates_provider_and_keeps_hypothesis_without_money(mon
         report=next(iter(app.session_state['opportunity_reports'].values()))['report']
         assert report['initiatives'][0]['economics']['scenarios']==[]
         assert report['normalization_status']=='incomplete'
-        assert any('группировки требует проверки' in x.value for x in app.warning)
+        assert any('Для части действий нужно уточнить границы операции и исполнителя' in x.value for x in app.warning)
         assert any('Для части операций нужно уточнить границы и участников' in x.value for x in app.warning)
         assert app.session_state['process_result_bytes']==original
         app.run(); assert UIProvider.count==1
@@ -267,7 +271,8 @@ def test_context_only_map_has_empty_result_without_provider_or_key(monkeypatch):
         assert not app.exception and not app.error
         artifact=next(iter(app.session_state['opportunity_reports'].values()))
         assert artifact['metrics']['requests']==0 and not artifact['report']['initiatives']
-        assert 'операционных оснований' in artifact['report']['explanation']
+        assert 'нет конкретных операций' in artifact['report']['explanation']
+        assert any('Подходящих инициатив не найдено' in x.value for x in app.info)
 
 
 def test_main_three_step_flow_including_empty_llm_parameters(monkeypatch):
@@ -297,7 +302,7 @@ def test_main_three_step_flow_including_empty_llm_parameters(monkeypatch):
         button(app,'Сформировать отчёт').click().run()
         assert not app.exception and not app.error and UIProvider.count==1
         assert any(s.value=='Отчёт готов.' for s in app.success)
-        labels={'Скачать отчёт (PDF)','Скачать все результаты (ZIP)'}
+        labels={'Скачать отчёт PDF','Скачать все материалы ZIP'}
         assert {b.label for b in app.get('download_button') if b.label in labels and b.proto.ignore_rerun}==labels
         technical=next(e for e in app.expander if e.label=='Технические данные')
         assert not technical.proto.expanded
@@ -431,9 +436,12 @@ def test_docx_failure_preserves_pdf_json_markdown_and_partial_bundle_without_rer
             assert not app.exception and UIProvider.count==1
             assert any('Не удалось подготовить: DOCX' in e.value for e in app.warning)
             assert all('private' not in e.value for e in app.warning)
+            cached=next(iter(app.session_state['opportunity_exports'].values()))
+            assert cached['errors'] and cached['errors'][0]['detail'].startswith('private')
+            assert cached['errors'][0]['reason']
             assert any(s.value=='Отчёт готов.' for s in app.success)
-            assert any(b.label=='Скачать отчёт (PDF)' for b in app.get('download_button'))
-            assert any(b.label=='Скачать доступные результаты (ZIP)' for b in app.get('download_button'))
+            assert any(b.label=='Скачать отчёт PDF' for b in app.get('download_button'))
+            assert any(b.label=='Скачать доступные материалы ZIP' for b in app.get('download_button'))
             main=app.main
             assert any(b.label=='Скачать Markdown' for b in main.get('download_button'))
             assert any(b.label=='Скачать данные анализа (JSON)' for b in main.get('download_button'))
@@ -442,7 +450,7 @@ def test_docx_failure_preserves_pdf_json_markdown_and_partial_bundle_without_rer
                         if c.args and c.args[0]=='Скачать данные анализа (JSON)')
             assert json.loads(backup)==saved
             archive=next(c.args[1] for c in reversed(download.call_args_list)
-                         if c.args and c.args[0]=='Скачать доступные результаты (ZIP)')
+                         if c.args and c.args[0]=='Скачать доступные материалы ZIP')
             with ZipFile(BytesIO(archive)) as partial:
                 assert 'opportunity-report.docx' not in partial.namelist()
                 assert 'opportunity-report.pdf' in partial.namelist()
@@ -453,7 +461,7 @@ def test_docx_failure_preserves_pdf_json_markdown_and_partial_bundle_without_rer
         assert not app.exception and not app.error and UIProvider.count==1
         assert next(iter(app.session_state['opportunity_reports'].values()))==saved
         assert failed.call_count==1
-        assert any(b.label=='Скачать доступные результаты (ZIP)' for b in app.get('download_button'))
+        assert any(b.label=='Скачать доступные материалы ZIP' for b in app.get('download_button'))
 
 
 def test_bundle_failure_keeps_docx_and_source_files_and_successful_exports_are_cached(monkeypatch):
@@ -492,7 +500,7 @@ def test_quarantined_source_is_visible_as_warning_not_as_accepted_initiative(mon
         artifact=next(iter(app.session_state['opportunity_reports'].values()))
         assert [i['id'] for i in artifact['report']['initiatives']]==[good['key']]
         assert artifact['report']['rejected'][0]['origin']=='integrity_validator'
-        assert any(b.label=='Скачать все результаты (ZIP)' for b in app.get('download_button'))
+        assert any(b.label=='Скачать все материалы ZIP' for b in app.get('download_button'))
 
 
 def test_busy_fragment_only_polls_session_and_refreshes_after_completion():
@@ -534,7 +542,7 @@ def test_numbered_report_restore_ui_docx_and_bundle_share_order_without_api(monk
         cards=[e.value for e in app.markdown if e.value.startswith('**№ ')]
         assert cards==[f"**{escape_text(initiative_title(i))}**" for i in initiatives]
         data={c.args[0]:c.args[1] for c in download.call_args_list if c.args}
-        with ZipFile(BytesIO(data['Скачать все результаты (ZIP)'])) as bundle:
+        with ZipFile(BytesIO(data['Скачать все материалы ZIP'])) as bundle:
             assert json.loads(bundle.read('opportunities.json'))==saved
             assert bundle.read('opportunity-report.docx')==data['Скачать отчёт (DOCX)']
             assert bundle.read('opportunity-report.md').decode()==render_markdown(saved)
@@ -551,7 +559,7 @@ def test_numbered_report_restore_ui_docx_and_bundle_share_order_without_api(monk
                    for p in c.paragraphs for run in p.runs if run.font.size)>=10.5
         assert not any(p.text=='Приложение с источниками' for p in doc.paragraphs)
         assert any(p.text=='Условия запуска и основания' for p in doc.paragraphs)
-        assert any(b.label=='Скачать отчёт (PDF)' for b in app.get('download_button'))
+        assert any(b.label=='Скачать отчёт PDF' for b in app.get('download_button'))
         app.run()
         assert not app.exception and not app.error
         assert next(iter(app.session_state['opportunity_reports'].values()))==saved
@@ -568,7 +576,7 @@ def test_pdf_failure_keeps_docx_and_full_json_and_explicit_restore_retries_expor
         with patch('govai.opportunity_ui.render_pdf', side_effect=RuntimeError('private PDF detail')) as failed:
             button(app, 'Сформировать отчёт').click().run()
             assert not app.exception and not app.error and UIProvider.count == 1
-            assert not any(b.label == 'Скачать отчёт (PDF)' for b in app.get('download_button'))
+            assert not any(b.label == 'Скачать отчёт PDF' for b in app.get('download_button'))
             assert any(b.label == 'Скачать отчёт (DOCX)' for b in app.get('download_button'))
             assert any('Не удалось подготовить: PDF' in w.value for w in app.warning)
             assert all('private' not in w.value for w in app.warning)
@@ -586,8 +594,8 @@ def test_pdf_failure_keeps_docx_and_full_json_and_explicit_restore_retries_expor
         app.run()
         button(app, 'Восстановить отчёт').click().run()
         assert not app.exception and not app.error and pdf.call_count == 1
-        assert any(b.label == 'Скачать отчёт (PDF)' for b in app.get('download_button'))
-        assert any(b.label == 'Скачать все результаты (ZIP)' for b in app.get('download_button'))
+        assert any(b.label == 'Скачать отчёт PDF' for b in app.get('download_button'))
+        assert any(b.label == 'Скачать все материалы ZIP' for b in app.get('download_button'))
         assert next(iter(app.session_state['opportunity_reports'].values())) == saved
         app.run(); assert pdf.call_count == 1 and UIProvider.count == 1
 
@@ -628,3 +636,129 @@ def test_shared_summary_and_all_exports_are_cached_with_preparation_time(monkeyp
         app.run(); app.run()
         assert view.call_count == pdf.call_count == word.call_count == details.call_count == markdown.call_count == bundle.call_count == 1
         assert next(iter(app.session_state['opportunity_reports'].values())) == saved
+
+
+def test_known_older_session_result_revalidated_after_prompt_update_without_api(monkeypatch):
+    from govai.analysis_io import digest
+    from govai.opportunities import compatibility
+    a, n, _, uploader = inputs()
+    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    assert saved['schema_version'] == '2.2'
+    old_key = digest(saved['compatibility'])
+    current_key = digest(compatibility(n, 'test-model', 'openai'))
+    assert old_key != current_key
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    with patch('streamlit.file_uploader', side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities', side_effect=AssertionError('No new generation')), \
+         patch('govai.opportunity_ui.restore_opportunities', wraps=__import__('govai.opportunity_ui', fromlist=['restore_opportunities']).restore_opportunities) as restore:
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        app.session_state['opportunity_reports'] = {old_key: saved}
+        app.run()
+        assert not app.exception and not app.error and restore.call_count == 1
+        assert app.session_state['opportunity_reports'][current_key] == saved
+        assert any(s.value == 'Отчёт готов.' for s in app.success)
+        assert not any(b.label == 'Сформировать отчёт' for b in app.button)
+        app.run(); assert restore.call_count == 1
+
+
+def test_other_or_modified_cached_report_is_not_shown_for_current_document(monkeypatch):
+    from copy import deepcopy
+    a, n, _, uploader = inputs()
+    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    with patch('streamlit.file_uploader', side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities', side_effect=AssertionError('No generation')):
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        for field in ('document_sha256', 'prompt_sha256'):
+            damaged = deepcopy(saved)
+            damaged['compatibility'][field] = 'not-the-current-source-or-contract'
+            app.session_state['opportunity_reports'] = {'old-cache-key': damaged}
+            app.run()
+            assert not app.exception
+            assert not any(s.value == 'Отчёт готов.' for s in app.success)
+            assert any(b.label == 'Сформировать отчёт' for b in app.button)
+
+
+def test_pdf_overflow_is_visible_and_download_remains_cached(monkeypatch):
+    a, n, _, _ = inputs()
+    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    _, _, _, uploader = inputs(json.dumps(saved).encode(), n)
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    status = {'pages': 7, 'brief_limit': 6, 'exceeded': True,
+              'message': 'В отчёте 7 страниц. Полный PDF доступен для скачивания.'}
+    with patch('streamlit.file_uploader', side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities', side_effect=AssertionError('No generation')), \
+         patch('govai.opportunity_ui.pdf_layout_status', return_value=status) as layout:
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        button(app, 'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        assert any('В отчёте 7 страниц' in w.value for w in app.warning)
+        assert any(b.label == 'Скачать отчёт PDF' for b in app.get('download_button'))
+        assert any(b.label == 'Скачать все материалы ZIP' for b in app.get('download_button'))
+        app.run(); assert layout.call_count == 1
+
+
+def test_known_older_plan_in_session_reassembles_without_provider(monkeypatch):
+    from govai.analysis_io import digest
+    a, n, _, uploader = inputs()
+    captured = []
+    generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))), on_plan=captured.append)
+    pending = captured[0]
+    old_key = digest(pending['compatibility'])
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    with patch('streamlit.file_uploader', side_effect=uploader), \
+         patch('govai.opportunity_ui.OpenAIOpportunityProvider.__init__', side_effect=AssertionError('No API provider')):
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        app.session_state['opportunity_plans'] = {old_key: pending}
+        app.run()
+        assert not app.exception and not app.error
+        assert any(b.label == 'Скачать резервный план' for b in app.get('download_button'))
+        button(app, 'Повторить сборку без API').click().run()
+        assert not app.exception and not app.error
+        assert any(s.value == 'Отчёт готов.' for s in app.success)
+        assert not any(b.label == 'Сформировать отчёт' for b in app.button)
+        metrics = next(iter(app.session_state['opportunity_stage_metrics'].values()))
+        assert metrics['api_wait_seconds'] == 0
+        assert metrics['local_seconds'] == metrics['elapsed_seconds']
+
+
+def test_invalid_pdf_bytes_keep_a_marked_partial_zip_and_source_json(monkeypatch):
+    a, n, _, _ = inputs()
+    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    _, _, _, uploader = inputs(json.dumps(saved).encode(), n)
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    with patch('streamlit.file_uploader', side_effect=uploader), \
+         patch('govai.opportunity_ui.generate_opportunities', side_effect=AssertionError('No generation')), \
+         patch('govai.opportunity_ui.render_pdf', return_value=b'not a PDF'), \
+         patch('streamlit.download_button', wraps=st.download_button) as download:
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        button(app, 'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        assert any('Не удалось подготовить: PDF' in w.value for w in app.warning)
+        assert not any(b.label == 'Скачать отчёт PDF' for b in app.get('download_button'))
+        data = next(c.args[1] for c in download.call_args_list
+                    if c.args and c.args[0] == 'Скачать доступные материалы ZIP')
+        with ZipFile(BytesIO(data)) as archive:
+            assert archive.testzip() is None
+            assert 'opportunity-report.pdf' not in archive.namelist()
+            assert json.loads(archive.read('opportunities.json')) == saved
+            assert 'opportunity-report.pdf' in archive.read('README.txt').decode()
+
+
+def test_partial_process_label_stays_visible_after_report_restore(monkeypatch):
+    a, np, _, _ = setup_inputs()
+    n = normalize_analysis(a, Normalizer(np.model_copy(update={'actions': np.actions[:1]})))
+    assert n['map']['status'] == 'incomplete'
+    saved = generate_opportunities(n, a, OpportunityMock(plan(proposal(n, ['register']))))
+    _, _, _, uploader = inputs(json.dumps(saved).encode(), n)
+    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
+    with patch('streamlit.file_uploader', side_effect=uploader):
+        app = load_saved_processes(AppTest.from_file(str(APP)))
+        button(app, 'Восстановить отчёт').click().run()
+        assert not app.exception and not app.error
+        assert any(e.label == 'Предварительный список процессов' for e in app.expander)
+        assert not any(e.label == 'Процессы готовы' for e in app.expander)
+        assert any(s.value == 'Отчёт готов.' for s in app.success)
