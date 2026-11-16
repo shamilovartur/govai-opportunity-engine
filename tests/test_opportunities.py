@@ -895,11 +895,13 @@ def test_summary_names_actual_first_pilot_candidates_and_explains_non_ai_alterna
     summary=text.split('## Карта процессов')[0]
     assert rows[0]['title'] in summary
     assert rows[1]['title'] in summary  # all accepted ideas, no extra summary card
-    cases=text.split('## Как работают инструменты')[1].split('## Ресурсы и эффект')[0]
-    assert rows[0]['measurement']['success_criterion'] in _read_markdown(cases) and 'специалист' in text.casefold()
-    assert 'не только фиксированный шаблон' in cases or 'фиксированная схема полей' in cases
+    cases=text.split('## Работа инструментов')[1].split('## Ресурсы и эффект')[0]
+    assert rows[0]['human_role'] in _read_markdown(cases) and 'специалист' in text.casefold()
+    assert rows[0]['measurement']['success_criterion'] not in _read_markdown(cases)
+    assert rows[0]['non_ai_alternative'].replace('ИИ','AI').casefold() in _read_markdown(summary).casefold()
     details=render_details(result)
     assert rows[0]['non_ai_alternative'] in _read_markdown(details) and rows[0]['human_role'] in _read_markdown(details)
+    assert rows[0]['measurement']['success_criterion'] in _read_markdown(details)
 
 
 def test_source_appendix_prefers_explicit_measured_scope_and_keeps_alternative_outcomes():

@@ -264,9 +264,9 @@ def test_full_approved_source_shows_seven_cards_and_exact_pdf_without_provider(m
         assert not any(b.label in ('Извлечь процессы', 'Сформировать отчёт') for b in app.button)
         assert 'process_result' not in app.session_state
         label = 'Скачать полный отчёт (PDF, 6 страниц)'
-        prepared = {call.args[0]: call.args[1] for call in downloads.call_args_list if call.args}
+        prepared = {call.kwargs['label']: call.kwargs['data'] for call in downloads.call_args_list if 'label' in call.kwargs}
         assert sha256(prepared[label]).hexdigest() == PDF_SHA256
-        assert len(app.get('download_button')) == 1
+        assert len(app.get('download_button')) == 2
         assert all(b.proto.ignore_rerun for b in app.get('download_button'))
         assert all(not b.proto.HasField('deferred_file_id') for b in app.get('download_button'))
         cached = next(iter(app.session_state['opportunity_exports'].values()))

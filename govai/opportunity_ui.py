@@ -233,17 +233,21 @@ def render_ready_report(key, artifact, *, document=None):
         st.info(business_text(outcome['message']))
     st.subheader('Рекомендации')
     st.write(f"Найдено рекомендаций: {len(view['cards'])}")
-    _render_management(view)
-    st.caption('Полный отчёт содержит карту процессов, подробные предложения и расчёт экономики')
+    download = None
     if files['pdf'] is not None:
         pages = files['pdf_layout']['pages']
         ending = ('страница' if pages % 10 == 1 and pages % 100 != 11 else
                   'страницы' if pages % 10 in (2, 3, 4) and pages % 100 not in (12, 13, 14) else 'страниц')
-        st.download_button(f'Скачать полный отчёт (PDF, {pages} {ending})', files['pdf'],
-            file_name='opportunity-report.pdf', mime='application/pdf', type='primary',
-            on_click='ignore', width='stretch')
+        download = {'label': f'Скачать полный отчёт (PDF, {pages} {ending})', 'data': files['pdf'],
+                    'file_name': 'opportunity-report.pdf', 'mime': 'application/pdf', 'type': 'primary',
+                    'on_click': 'ignore', 'width': 'stretch'}
+        st.download_button(**download, key=f'report_pdf_top_{key}')
+        st.caption('Полный отчёт содержит карту процессов, подробные предложения и расчёт экономики')
     else:
         st.warning('Не удалось подготовить PDF. Рекомендации сохранены; можно повторить подготовку файла без нового анализа.')
         if st.button('Повторить подготовку PDF'):
             st.session_state.get('opportunity_exports', {}).pop('public-' + key, None)
             st.rerun()
+    _render_management(view)
+    if download:
+        st.download_button(**download, key=f'report_pdf_bottom_{key}')

@@ -158,6 +158,66 @@ def test_pilot_names_the_quality_indicator_instead_of_an_unresolved_reference():
     assert 'по основной метрике' in initiative['measurement']['success_criterion']
 
 
+def test_business_case_uses_materials_work_result_and_human_responsibility_not_test_instructions():
+    from govai.opportunity_report import management_blocks, _block_paragraphs
+    artifact, _, _, _ = _management_fixture(2)
+    row = artifact['report']['initiatives'][0]
+    row.update(input_materials=['Записи в медицинской документации пациента'],
+        ai_role='Находить сведения в предоставленных записях и готовить проект. При недостаточности сведений обозначать пробел.',
+        staff_result='Проект справки с источниками и перечнем пробелов.',
+        human_role='Врач проверяет основания, исправляет и подписывает документ. Необходимость обследования определяет человек.')
+    row['measurement']['method']='Сравнить проекты и использовать экспертную оценку.'
+    row['priority']['reason']='Задача имеет ограниченный результат и допускает проверку без выдачи документа.'
+    before = deepcopy(artifact)
+    view = management_view(artifact)
+    card = next(value for kind, value in management_blocks(view) if kind == 'card')
+    body = ' '.join(_block_paragraphs('card', card))
+    assert 'Записи в медицинской документации пациента' in body
+    assert 'AI будет находить сведения' in body and '; при недостаточности сведений обозначать пробел.' in body
+    assert 'проект справки с источниками и перечнем пробелов' in body
+    assert row['human_role'] in body and row['priority']['reason'] in body
+    assert 'Сравнить проекты' not in body and 'Использовать экспертную оценку' not in body
+    for text in (render_markdown(artifact).replace('\\.', '.'), _pdf_text(render_pdf(artifact))):
+        assert row['human_role'] in text and 'перечнем пробелов' in text
+        assert 'Сравнить проекты' not in text
+    assert artifact == before  # No source, economics, plan or measurement is edited.
+
+
+def test_process_table_keeps_groups_participants_links_and_requirements_without_invented_mergers():
+    from govai.opportunity_report import management_blocks
+    artifact, _, _, _ = _management_fixture(2)
+    groups = artifact['report']['process_map']['groups']
+    groups[0].update(title='Выдача бумажных документов', summary='Личная выдача и выдача представителю.')
+    groups[1].update(title='Предоставление электронных документов', summary='Выдача с согласия получателя.')
+    groups[0]['actions'][0]['actors']=['Уполномоченный специалист']
+    before = deepcopy(artifact)
+    view = management_view(artifact)
+    tables = [v for k,v in management_blocks(view) if k=='table' and v['headers'][0]=='Работа и предложение']
+    assert len(tables)==1 and len(tables[0]['rows'])==2
+    for group, row in zip(groups,tables[0]['rows']):
+        assert group['title'] in row[0] and group['summary'] in row[1]
+    assert '№ 1' in tables[0]['rows'][0][0] and '№ 2' in tables[0]['rows'][1][0]
+    assert 'Уполномоченный специалист' in tables[0]['rows'][0][1]
+    assert artifact == before
+
+
+def test_resource_roles_and_tasks_are_a_table_without_changing_numbers():
+    from govai.opportunity_report import management_blocks
+    artifact, _, _, _ = _management_fixture(1)
+    artifact['report']['initiatives'][0]['resources'] = {
+        'status':'illustrative', 'effort':{'min':'10','max':'19'},
+        'tasks':[{'role':'Предметный эксперт','work':'Определить допустимые сведения'}],
+        'scope':'Изолированный прототип без интеграции выдачи и подписания.'}
+    before=deepcopy(artifact)
+    view=management_view(artifact)
+    tables=[v for k,v in management_blocks(view) if k=='table' and v['headers']==['Участники','Работа']]
+    assert tables[0]['rows']==[['Предметный эксперт','Определить допустимые сведения']]
+    text=_pdf_text(render_pdf(artifact))
+    assert '10–19 человеко-дней' in text and 'Сценарная оценка' in text
+    assert 'Предметный эксперт: Определить' not in text
+    assert artifact==before
+
+
 def test_category_meanings_and_known_participant_limit_are_visible():
     artifact, _, _, _ = _management_fixture(1)
     initiative = artifact['report']['initiatives'][0]
@@ -363,8 +423,8 @@ def test_full_process_map_keeps_groups_without_ai_and_context_is_not_an_operatio
     for text in (render_markdown(artifact).replace('\\.', '.'), _pdf_text(render_pdf(artifact))):
         assert 'Карта процессов' in text
         assert second['title'] in text
-        assert second['non_ai_reasons'][0] in text
-        assert 'не подтверждённый самостоятельный бизнес-процесс' in text
+        assert 'не подтверждённый самостоятельный бизнес-процесс' not in text
+    assert second['non_ai_reasons'] == group['non_ai_reasons']
     assert 'context' in render_details(artifact)
 
 

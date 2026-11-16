@@ -172,7 +172,7 @@ def test_single_button_sequences_stages_and_document_change_clears_report(monkey
         assert not app.exception and not app.error
         assert app.session_state['process_checkpoints'] and app.session_state['normalized_maps'] and app.session_state['opportunity_reports']
         assert len(calls)==1 and not app.button
-        assert len(app.get('download_button'))==1
+        assert len(app.get('download_button'))==2
         assert not app.json and not app.dataframe and not app.text_area
         app.run();assert len(calls)==1
         current[0]=upload('1. Другой документ с другой операцией.')

@@ -87,7 +87,11 @@ def test_one_button_uses_restored_stages_and_never_repeats_on_rerun():
         saved=next(iter(app.session_state['opportunity_reports'].values()))
         files=next(iter(app.session_state['opportunity_exports'].values()))
         assert 'json' not in files and 'docx' not in files
-        pdf=next(c.args[1] for c in downloads.call_args_list if c.args and c.args[0].startswith('Скачать полный отчёт'))
+        calls=[c.kwargs for c in downloads.call_args_list if c.kwargs.get('label','').startswith('Скачать полный отчёт')]
+        assert len(calls)==2 and calls[0]['data'] is calls[1]['data']
+        assert calls[0]['key'].startswith('report_pdf_top_')
+        assert calls[1]['key'].startswith('report_pdf_bottom_')
+        pdf=calls[0]['data']
         assert isinstance(pdf,bytes) and PdfReader(BytesIO(pdf)).pages
         assert not app.button
         app.run(); app.run()
@@ -161,8 +165,9 @@ def test_pdf_failure_retains_report_and_explicit_local_retry_uses_no_api():
         assert any(b.label.startswith('Скачать полный отчёт') for b in app.get('download_button'))
 
 
-@pytest.mark.parametrize('page_count',[1,2,7,21])
-def test_actual_pdf_page_count_never_hides_long_result(page_count):
+@pytest.mark.parametrize(('page_count','ending'),[(1,'страница'),(2,'страницы'),(7,'страниц'),
+    (11,'страниц'),(12,'страниц'),(14,'страниц'),(21,'страница'),(22,'страницы'),(25,'страниц')])
+def test_actual_pdf_page_count_never_hides_long_result(page_count,ending):
     a,n,original,uploader=inputs(); saved=generate_opportunities(n,a,OpportunityMock(plan(proposal(n,['register']))))
     writer=PdfWriter()
     for _ in range(page_count): writer.add_blank_page(width=450,height=800)
@@ -170,8 +175,10 @@ def test_actual_pdf_page_count_never_hides_long_result(page_count):
     with patch('streamlit.file_uploader',side_effect=uploader),patch('govai.opportunity_ui.render_pdf',return_value=data.getvalue()):
         app=seed(AppTest.from_file(str(APP)),a,n,original,saved)
         assert_public(app)
-        assert len(app.get('download_button'))==1
-        assert f'PDF, {page_count} ' in app.get('download_button')[0].label
+        buttons=app.get('download_button')
+        assert len(buttons)==2 and len({b.key for b in buttons})==2
+        assert all(b.label==f'Скачать полный отчёт (PDF, {page_count} {ending})' for b in buttons)
+        assert sum(c.value.startswith('Полный отчёт содержит') for c in app.caption)==1
 
 
 def test_active_report_request_prevents_reentry():

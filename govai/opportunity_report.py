@@ -530,6 +530,28 @@ def _short_resources(initiative):
     return 'Ресурс прототипа пока не оценён.'
 
 
+def _sentences(*parts):
+    """Join complete saved statements, omitting exact repetition only."""
+    sentences = []
+    for part in parts:
+        for sentence in re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', business_text(part or '')):
+            if sentence and sentence.rstrip('.!?').casefold() not in {
+                    text.rstrip('.!?').casefold() for text in sentences}:
+                sentences.append(sentence if sentence.endswith(('.', '!', '?')) else sentence + '.')
+    return ' '.join(sentences)
+
+
+def _ai_work(text):
+    """Give a saved infinitive task a subject, without adding an action or fact."""
+    text = business_text(text)
+    first = text.split(maxsplit=1)[0] if text else ''
+    if re.fullmatch(r'[А-Яа-яёЁ]+(?:ть|ти|чь)', first):
+        # Conditional clauses in an infinitive task depend on the same predicate.
+        text = re.sub(r'\. (При|Если)\b', lambda match: '; ' + match[1].lower(), text)
+        return _sentences('AI будет ' + text[0].lower() + text[1:])
+    return _sentences(text)
+
+
 def _process_groups_view(report, ranks):
     """Display every verified group; do not promote context records into operations."""
     process_map = report.get('process_map') or {}
@@ -554,6 +576,7 @@ def _process_groups_view(report, ranks):
         clauses = list(dict.fromkeys(str(evidence[ref]['clause_number']) for ref in refs
                                     if ref in evidence and evidence[ref].get('clause_number')))
         linked = [ranks[key] for key in group.get('initiative_ids', []) if key in ranks]
+        requirements = [action for action in actions if action.get('kind') == 'requirement']
         groups.append({'id': group['id'], 'title': business_text(group['title']),
             'summary': business_text(group.get('summary') or ''), 'lane': group.get('lane'),
             'operations': [business_text(action['title']) for action in operations],
@@ -565,6 +588,8 @@ def _process_groups_view(report, ranks):
             'issues': list(dict.fromkeys(business_text(text) for text in group.get('classification_issues', []))),
             'requires_review': bool(group.get('classification_issues') or group.get('lane') == 'review'),
             'context_records': len(actions) - len(operations)})
+        groups[-1]['requirements'] = list(dict.fromkeys(business_text(text)
+            for action in requirements for text in (action.get('conditions') or [action['title']])))
     return groups
 
 
@@ -595,6 +620,7 @@ def management_view(artifact):
             'title': business_text(presentation.get('short_title') or item['title']),
             'description': re.sub(r'^Инструмент\b', 'AI', business_text(description)),
             'benefit': business_text(presentation.get('expected_effect_short') or item['expected_effect']),
+            'alternative': business_text(item['non_ai_alternative']),
             'effect': business_text(economic_summary(item)) if ready and item['economics']['scenarios'] else (business_text(item['expected_effect']) if not presentation.get('business_summary') else ''),
             'resources': _short_resources(item),
             'priority_reason': business_text(presentation.get('ordering_reason') or priority.get('reason') or prospect['reason']),
@@ -605,6 +631,8 @@ def management_view(artifact):
             'assessment_limit': ('Недостаточно оснований для оценки. ' + business_text(' '.join(prospect.get('assessment_issues', [])))) if prospect['category'] == 'insufficient' else ''}
         cards.append(card)
         details.append({**card,
+            'ai_role': business_text(item['ai_role']),
+            'priority_explanation': business_text(priority.get('reason') or card['priority_reason']),
             'why_ai': business_text(item['why_ai']), 'alternative': business_text(item['non_ai_alternative']),
             'check': business_text(prospect['pilot']), 'criterion': _pilot_check(item),
             'input_materials': [business_text(x) for x in item.get('input_materials', [])],
@@ -612,7 +640,8 @@ def management_view(artifact):
             'uncertainty': business_text(prospect['main_uncertainty']),
             'change_condition': business_text(priority.get('change_condition') or prospect['change_condition']),
             'risks': list(dict.fromkeys(business_text(x) for x in item['risks'])),
-            'resource_tasks': [business_text(t['role'] + ': ' + t['work']) for t in (item.get('resources') or {}).get('tasks', [])],
+            'resource_tasks': [{'role': business_text(t['role']), 'work': business_text(t['work'])}
+                               for t in (item.get('resources') or {}).get('tasks', [])],
             'resource_scope': business_text((item.get('resources') or {}).get('scope', '')),
             'boundary': business_text(measurement.get('boundary', '')),
             'metric': business_text(measurement['primary']['name']),
@@ -630,7 +659,7 @@ def management_view(artifact):
     participants = list(dict.fromkeys(actor for g in operations for actor in g['participants']))
     conditions = []
     if initiatives:
-        conditions.append('AI помогает подготовить и проверить материалы. Решение и подписание остаются уполномоченному специалисту. Нужны разрешённые данные и защищённая среда обработки.')
+        conditions.append('Для пилота нужны разрешённые данные и защищённая среда обработки.')
         if not effects:
             conditions.append('Экономия пока не рассчитана. Для оценки нужны замеры обычного способа и работы с AI, включая проверку и исправления сотрудником, а также число подходящих случаев. Стоимость труда, внедрения и эксплуатации неизвестна, а не равна нулю.')
         else:
@@ -675,6 +704,7 @@ def management_blocks(view):
     rows = view['cards']
     yield 'heading', 'Рекомендации' if rows else business_text(view['outcome']['title'])
     yield 'requisites', view['requisites']
+    if view.get('scope'): yield 'paragraph', view['scope']
     if not rows:
         yield 'paragraph', business_text(view['outcome']['message'])
         if view['outcome'].get('action'): yield 'paragraph', business_text(view['outcome']['action'])
@@ -686,20 +716,24 @@ def management_blocks(view):
     if view.get('process_groups') or view.get('context_groups'):
         if page_sections: yield 'page_break', ''
         yield 'heading', 'Карта процессов'
-        if view.get('participants'):
-            yield 'paragraph', 'В документе названы следующие участники: ' + '; '.join(view['participants']) + '.'
         if view.get('service_map'):
             yield 'paragraph', view['service_map']['scope']
             for stage in view['service_map']['stages']:
                 yield 'paragraph', stage['stage'] + '. ' + stage['participant'] + ': ' + stage['result'] + ' ' + stage['clauses'] + '.'
-        else:
-            for group in view['operational_groups']: yield 'process_group', group
+        elif view['operational_groups']:
+            yield 'table', {'headers': ['Работа и предложение', 'Участники и результат'],
+                'widths': [0.38, 0.62], 'rows': [[
+                    g['title'] + (' · ' + ', '.join('№ ' + str(n) for n in g['initiative_numbers'])
+                                  if g['initiative_numbers'] else ''),
+                    _sentences('; '.join(g['participants']), g['summary'], g['clauses'])]
+                    for g in view['operational_groups']]}
         for group in view.get('context_groups', []):
-            yield 'paragraph', group['title'] + '. Это общее условие, не подтверждённый самостоятельный бизнес-процесс. ' + group['summary'] + ' ' + ' '.join(group['non_ai_reasons']) + ' ' + group['clauses'] + '.'
+            yield 'paragraph', _sentences(group['title'], *(group.get('requirements') or [group['summary']]),
+                                         group['clauses'])
         # Specific measurement limits are stated once with resources and effects.
     if view['details']:
         if page_sections: yield 'page_break', ''
-        yield 'heading', 'Как работают инструменты'
+        yield 'heading', 'Работа инструментов'
         # Every recommendation remains in the overview; the first three receive
         # full business cases regardless of a high/medium category label.
         for detail in view['details'][:3]: yield 'card', detail
@@ -710,7 +744,8 @@ def management_blocks(view):
             yield 'subheading', f"№ {detail['rank']}. {detail['title']}"
             yield 'paragraph', detail['resources']
             if detail.get('resource_tasks'):
-                yield 'paragraph', '; '.join(detail['resource_tasks']) + '.'
+                yield 'table', {'headers': ['Участники', 'Работа'], 'widths': [0.38, 0.62],
+                    'rows': [[task['role'], task['work']] for task in detail['resource_tasks']]}
             if detail.get('resource_scope'): yield 'paragraph', detail['resource_scope']
         for effect in view['effects']:
             yield 'subheading', f"№ {effect['number']}. Сценарии"
@@ -722,7 +757,6 @@ def management_blocks(view):
         # Citation pointers appear once, while full quotes and source IDs stay
         # unchanged in the saved artifact and the developer-only appendix.
         yield 'paragraph', 'Основания: ' + '; '.join(f"№ {r['number']} — {r['clauses']}" for r in view['source_index']) + '.'
-    if view.get('scope'): yield 'paragraph', view['scope']
 
 
 def _block_paragraphs(kind, value):
@@ -735,19 +769,24 @@ def _block_paragraphs(kind, value):
         if value.get('dependencies'): yield 'Зависит от: ' + ', '.join(value['dependencies'])
         if value.get('priority_reason'): yield value['priority_reason']
         if value.get('condition') and value['condition'] not in value['description']: yield value['condition']
+        if value.get('alternative'):
+            yield _sentences('Вариант без AI — ' + value['alternative'][0].lower() + value['alternative'][1:])
     elif kind == 'process_group':
         linked = ', '.join('№ ' + str(n) for n in value['initiative_numbers'])
         yield value['title'] + (f' · {linked}' if linked else '')
         yield value['summary'] + ' ' + value['clauses'] + '.'
     elif kind == 'card':
         yield f"№ {value['number']}. {value['title']}"
-        yield value['why_ai'] + ' ' + value['alternative']
-        yield value['criterion']
-        safety = value.get('quality_protocol', {}).get('unacceptable_errors')
-        if safety:
-            yield 'Недопустимы: ' + safety[0].lower() + safety[1:]
-        elif value.get('risks'):
-            yield ' '.join(value['risks'])
+        materials = '; '.join(value.get('input_materials', []))
+        yield _sentences('Для работы используются материалы: ' + materials if materials else '',
+                         _ai_work(value.get('ai_role', '')))
+        result = value.get('staff_result', '')
+        yield _sentences('Сотрудник получает результат: ' + result[0].lower() + result[1:] if result else '',
+                         value['human_role'])
+        # The checked comparison's first complete statement explains this place.
+        # Dependencies remain explicit in the overview; full reasoning stays in data.
+        reason = value.get('priority_explanation') or value.get('priority_reason') or ''
+        yield _sentences(re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', reason, maxsplit=1)[0])
 
 
 def render_markdown(artifact, *, view=None):

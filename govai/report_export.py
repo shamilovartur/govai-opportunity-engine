@@ -18,7 +18,7 @@ from govai.opportunity_report import (
     management_view, management_blocks, _block_paragraphs, render_markdown, render_details,
 )
 
-EXPORT_VERSION = 'management-6'
+EXPORT_VERSION = 'management-7'
 _FONT_DIR = Path(__file__).with_name('fonts')
 _FONT_NAME = 'IBM Plex Sans'
 _PAGE_SIZE = (450, 800)
@@ -60,15 +60,16 @@ def _docx_table(document, data):
     headers, rows = data['headers'], data['rows']
     if not headers or any(len(row) != len(headers) for row in rows):
         raise ValueError('Inconsistent report table.')
-    width = (_PAGE_SIZE[0] - 2 * _MARGIN) / len(headers)
+    widths = [(_PAGE_SIZE[0] - 2 * _MARGIN) * fraction
+              for fraction in data.get('widths', [1 / len(headers)] * len(headers))]
     table = document.add_table(rows=0, cols=len(headers)); table.autofit = False
-    for column in table.columns: column.width = Pt(width)
+    for column, width in zip(table.columns, widths): column.width = Pt(width)
     for index, values in enumerate([headers, *rows]):
         row = table.add_row()
         if index == 0: row._tr.get_or_add_trPr().append(OxmlElement('w:tblHeader'))
         # Long rows remain splittable. No setting may force an oversized cell
         # off the printable page or silently lose its final paragraphs.
-        for cell, value in zip(row.cells, values):
+        for cell, value, width in zip(row.cells, values, widths):
             cell.width = Pt(width); cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             paragraph = cell.paragraphs[0]
             paragraph.paragraph_format.space_after = Pt(5)
@@ -169,8 +170,8 @@ def render_pdf(artifact, *, view=None):
     view = management_view(artifact) if view is None else view
     _register_pdf_fonts()
     styles = {
-        'body': ParagraphStyle('body', fontName='GovAIPlex', fontSize=12, leading=15.8,
-            spaceAfter=7, textColor=colors.HexColor('#' + _COLORS['text']), allowWidows=False, allowOrphans=False),
+        'body': ParagraphStyle('body', fontName='GovAIPlex', fontSize=12, leading=15.2,
+            spaceAfter=6, textColor=colors.HexColor('#' + _COLORS['text']), allowWidows=False, allowOrphans=False),
         'heading': ParagraphStyle('heading', fontName='GovAIPlexBold', fontSize=24.5, leading=28,
             spaceBefore=14, spaceAfter=12, textColor=colors.HexColor('#' + _COLORS['navy']), keepWithNext=True),
         'subheading': ParagraphStyle('subheading', fontName='GovAIPlexBold', fontSize=15, leading=19,
@@ -189,8 +190,8 @@ def render_pdf(artifact, *, view=None):
         table = Table([[contents]], colWidths=[doc.width], splitInRow=1)
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#' + _COLORS[fill])),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12), ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 11), ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('LEFTPADDING', (0, 0), (-1, -1), 9), ('RIGHTPADDING', (0, 0), (-1, -1), 9),
+            ('TOPPADDING', (0, 0), (-1, -1), 8), ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
             ('VALIGN', (0, 0), (-1, -1), 'TOP')]))
         # Keep a measured card together only if it fits on a complete page.
         # Oversized cards split at paragraph/line boundaries without clipping.
@@ -201,7 +202,11 @@ def render_pdf(artifact, *, view=None):
 
     story = []
     for kind, value in management_blocks(view):
-        if kind == 'page_break': story.append(PageBreak())
+        if kind == 'page_break':
+            # A trailing spacer can spill onto an otherwise empty page just
+            # before the explicit section break. It carries no report content.
+            while story and isinstance(story[-1], Spacer): story.pop()
+            story.append(PageBreak())
         elif kind in ('heading', 'subheading'): story.append(paragraph(value, kind))
         elif kind == 'conclusion':
             story += [paragraph(value['heading'], 'heading'), panel([paragraph(value['text'])], 'mint'), Spacer(1, 8)]
@@ -211,12 +216,8 @@ def render_pdf(artifact, *, view=None):
         elif kind in ('ranked_card', 'card'):
             texts = list(_block_paragraphs(kind, value))
             contents = [paragraph(texts[0], 'subheading'), *[paragraph(text) for text in texts[1:]]]
-            if kind == 'card':
-                # Full business cases are paragraphs, not an oversized indivisible
-                # tile. The heading follows its first paragraph across pages.
-                story += [*contents, Spacer(1, 10)]
-            else:
-                story += [panel(contents, 'pale' if kind == 'process_group' else 'paper'), Spacer(1, 6)]
+            fill = ('pale', 'peach', 'mint')[(value['number'] - 1) % 3]
+            story += [panel(contents, fill), Spacer(1, 8)]
         elif kind == 'notice': story += [panel([paragraph(value['text'])], 'peach'), Spacer(1, 8)]
         elif kind == 'table':
             headers, data = value['headers'], value['rows']
@@ -224,7 +225,8 @@ def render_pdf(artifact, *, view=None):
                 raise ValueError('Inconsistent report table.')
             cells = [[paragraph(cell, 'tablehead' if index == 0 else 'table') for cell in row]
                      for index, row in enumerate([headers, *data])]
-            table = Table(cells, colWidths=[doc.width / len(headers)] * len(headers), repeatRows=1, splitInRow=1)
+            widths = [doc.width * fraction for fraction in value.get('widths', [1 / len(headers)] * len(headers))]
+            table = Table(cells, colWidths=widths, repeatRows=1, splitInRow=1)
             table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#' + _COLORS['pale'])),
