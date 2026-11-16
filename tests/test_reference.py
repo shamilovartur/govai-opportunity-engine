@@ -169,7 +169,7 @@ def test_all_original_approved_paragraphs_remain_in_markdown_and_details(documen
     details = reference.render_reference_details(saved)
     assert 'scenario_assumptions' not in markdown
     assert 'illustrative' in details
-    assert 'не ставки ведомства' in markdown
+    assert 'не отражают расходы ведомства' in markdown
     assert reference.SOURCE_SHA256 in details
 
 

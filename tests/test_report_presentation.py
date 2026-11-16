@@ -38,7 +38,7 @@ def test_service_overview_is_shared_by_documents_and_keeps_exact_sources_in_deta
     texts=[render_markdown(artifact).replace('\\.','.'),_pdf_text(pdf),
            ' '.join(node.text or '' for node in Document(BytesIO(docx)).element.iter() if node.tag.endswith('}t'))]
     for text in texts:
-        assert 'Как проходит услуга' in text
+        assert 'Карта процессов' in text
         assert all(stage[key] in text for key in ('stage','participant','result','clauses'))
         assert editorial['ordering_basis'] in text
     details=render_details(artifact)
@@ -56,8 +56,8 @@ def test_incomplete_grouping_does_not_claim_that_source_text_is_incomplete():
     artifact,_,_,_=_management_fixture(1)
     artifact['report']['normalization_status']='incomplete'
     view=management_view(artifact)
-    assert 'разграничить часть действий и участников' in view['input_limitation']
-    assert 'Числовые оценки допустимы только для отдельно определённой работы и её участника' in view['input_limitation']
+    assert 'уточнить исполнителя и границы работы' in view['input_limitation']
+    assert 'общий объём эффекта не оценён' in view['input_limitation']
     assert 'охват' not in view['input_limitation'] and 'полнот' not in view['input_limitation']
     # Source completeness is stated separately; it cannot be inferred from grouping.
     assert view['scope']
@@ -76,7 +76,7 @@ def test_full_legal_title_is_preserved_in_appendix_with_requisites_in_main_repor
     for text in texts:
         assert title not in text
         assert view['requisites'] in text
-        assert 'opportunity-details.txt' in text
+        assert 'Основания:' in text and 'opportunity-details.txt' not in text
     assert artifact['report']['document']['title']==title
 
 
@@ -87,7 +87,7 @@ def test_full_pdf_survives_layout_overflow_without_losing_initiatives():
     # Legacy analytic fields can be much longer than the new concise fields.
     # This view-only layout fixture deliberately does not alter the source artifact.
     for row in view['initiatives']:
-        row['benefit'] = ('Помочь специалисту сопоставить доводы с первоисточниками и подготовить проверяемый ответ. ' * 9).strip()
+        row['description'] = ('Помочь специалисту сопоставить доводы с первоисточниками и подготовить проверяемый ответ. ' * 9).strip()
         row['condition'] = ('До пилота подтвердить доступ к материалам и правила человеческой проверки. ' * 6).strip()
     data = render_pdf(artifact, view=view)
     status = pdf_layout_status(data)
@@ -97,7 +97,7 @@ def test_full_pdf_survives_layout_overflow_without_losing_initiatives():
     for row in view['initiatives']:
         assert f"№ {row['number']}. {row['title']}" in text
         assert row['condition'] in text
-        assert row['benefit'] in text
+        assert row['description'] in text
     docx = render_docx(artifact, view=view)
     assert Document(BytesIO(docx)).paragraphs
     bundle = render_bundle(artifact, view=view, pdf_data=data, docx_data=docx)
@@ -131,11 +131,13 @@ def test_model_executive_summary_is_shared_without_mechanical_repetition():
                'Сначала нужно подтвердить доступ к обезличенным примерам.')
     artifact['report']['presentation'].update(origin='model', executive_summary=summary)
     view = management_view(artifact)
-    assert view['conclusion']['text'] == summary
-    assert render_markdown(artifact).count(summary.replace('.', '\\.')) == 1
-    assert _pdf_text(render_pdf(artifact)).count(summary) == 1
+    assert view['conclusion']['text'] == ''
+    assert artifact['report']['presentation']['executive_summary'] == summary
+    assert summary.replace('.', '\\.') not in render_markdown(artifact)
+    assert summary not in _pdf_text(render_pdf(artifact))
     body = '\n'.join(node.text or '' for node in Document(BytesIO(render_docx(artifact))).element.iter() if node.tag.endswith('}t'))
-    assert body.count(summary) == 1
+    assert summary not in body
+    assert view['cards'][0]['title'] in body
     # No source or numeric field was changed by any renderer.
     for key in ('plan', 'scenario_inputs'):
         assert artifact[key] == original[key]
@@ -149,9 +151,9 @@ def test_pilot_names_the_quality_indicator_instead_of_an_unresolved_reference():
     initiative['measurement']['success_criterion'] = (
         'Превосходство над обычным поиском по основной метрике при отсутствии критических ошибок.')
     view = management_view(artifact)
-    check = view['pilots'][0]['check']
+    check = view['details'][0]['criterion']
     assert indicator in check and 'по основной метрике' not in check
-    assert initiative['measurement']['method'] in check
+    assert initiative['measurement']['method'].replace('ИИ','AI') in check
     assert 'при отсутствии критических ошибок' in check
     assert 'по основной метрике' in initiative['measurement']['success_criterion']
 
@@ -162,12 +164,11 @@ def test_category_meanings_and_known_participant_limit_are_visible():
     initiative['measurement']['participant']['category'] = 'unknown'
     initiative['measurement']['partial_initiative'] = True
     view = management_view(artifact)
-    assert view['priority_groups'][0]['title'] == 'В первую очередь'
-    assert 'ресурсы' in view['priority_groups'][0]['explanation'].lower()
+    assert view['cards'][0]['category']=='high'
     assert any('№ 1' in text and 'исполнитель измеряемой работы не установлен' in text for text in view['conditions'])
     assert any('№ 1' in text and 'только часть работы' in text for text in view['conditions'])
-    assert 'В первую очередь' in render_markdown(artifact)
-    assert 'В первую очередь' in _pdf_text(render_pdf(artifact))
+    assert 'исполнитель измеряемой работы не установлен' in render_markdown(artifact)
+    assert 'исполнитель измеряемой работы не установлен' in _pdf_text(render_pdf(artifact))
 
 
 def test_a_short_pdf_status_does_not_report_an_overflow():
@@ -209,7 +210,7 @@ def test_rejected_source_plan_never_returns_as_a_recommendation_in_any_format():
         'origin': 'integrity_validator', 'reason': 'Контекстная ссылка не была допущена проверкой источников.'}]
     view = management_view(artifact)
     assert view['outcome']['state'] == 'rejected'
-    assert not view['initiatives'] and not view['pilots'] and not view['highlights'] and not view['priority_groups']
+    assert not view['initiatives'] and not view['pilots'] and not view['highlights']
     assert 'Это не означает' in view['conclusion']['text']
     assert 'не прошли проверку' in view['conclusion']['text']
     texts = [render_markdown(artifact), _pdf_text(render_pdf(artifact)),
@@ -217,7 +218,7 @@ def test_rejected_source_plan_never_returns_as_a_recommendation_in_any_format():
     for text in texts:
         assert 'Выделена одна содержательная гипотеза' not in text
         assert 'Начать с отвергнутой маршрутизации' not in text
-        assert 'Обоснованных вариантов применения ИИ не найдено' not in text
+        assert 'Обоснованных вариантов применения AI не найдено' not in text
         assert 'Сначала подтвердить основания предложений' in text
     assert artifact['plan'] == original['plan']
 
@@ -237,7 +238,8 @@ def test_outcome_distinguishes_normal_exclusions_partial_and_unfinished_results(
     unfinished = management_view(artifact)
     assert unfinished['outcome']['state'] == 'unfinished'
     assert not unfinished['highlights'] and not unfinished['pilots']
-    assert unfinished['priority_groups'][0]['title'] == 'Пока не запускать'
+    assert 'Анализ не завершён' in render_markdown(artifact)
+    assert not unfinished['effects']
 
 
 def test_no_opportunity_result_does_not_reuse_unchecked_model_explanation():
@@ -246,7 +248,7 @@ def test_no_opportunity_result_does_not_reuse_unchecked_model_explanation():
     artifact['report']['rejected'] = [{'title': 'Проверка формата', 'origin': 'model', 'reason': 'Достаточно обычных правил.'}]
     assert report_outcome(artifact)['state'] == 'none'
     text = render_markdown(artifact)
-    assert 'Обоснованных вариантов применения ИИ не найдено' in text
+    assert 'Обоснованных вариантов применения AI не найдено' in text
     assert 'Выделена одна' not in text
     assert not management_view(artifact)['highlights']
 
@@ -261,8 +263,8 @@ def test_real_arithmetic_highlights_are_scoped_and_do_not_create_resource_number
     assert by_label['человеко-часа']['value'] == '133,33'
     assert '1 000' in by_label['человеко-часа']['basis']
     assert all(h['status'] == 'Сценарий' and h['number'] == 1 for h in view['highlights'])
-    assert 'не оценены' in view['pilots'][0]['resources']
-    assert not view['pilots'][0]['flow']
+    assert 'не оценён' in view['cards'][0]['resources']
+    assert not view['effects'][0]['rows'][0][-1].endswith('рублей')
     assert artifact == before
 
 
@@ -280,11 +282,11 @@ def test_new_validated_resources_and_proposed_flow_are_visible_without_summing_i
     view = management_view(artifact)
     assert '4–8 человеко-дней' in view['pilots'][0]['resources']
     assert 'не календарный срок' in view['pilots'][0]['resources']
-    assert 'утверждённый справочник' in view['pilots'][0]['resources']
-    assert len(view['pilots'][0]['flow']) == 3
+    assert 'утверждённый справочник' in render_details(artifact)
+    assert row['proposed_flow'][1] in render_details(artifact)
     assert len([h for h in view['highlights'] if h['label'] == 'человеко-дней реализации']) == 1
-    assert 'Предлагаемая работа' in render_markdown(artifact)
-    assert row['proposed_flow'][1] in _pdf_text(render_pdf(artifact))
+    assert '4–8 человеко-дней' in render_markdown(artifact)
+    assert '4–8 человеко-дней' in _pdf_text(render_pdf(artifact))
     appendix = render_details(artifact).replace('\\.', '.')
     assert row['resources']['tasks'][0]['basis'] in appendix
     assert row['resources']['tasks'][0]['work'] in appendix
@@ -299,10 +301,11 @@ def test_ready_medium_preserves_checked_summary_without_promoting_it_to_first_pi
     artifact['report']['presentation'].update(origin='model', executive_summary=summary)
     view = management_view(artifact)
     assert view['outcome']['state'] == 'ready'
-    assert summary in view['conclusion']['text'] and summary.replace('.', '\\.') in render_markdown(artifact)
+    assert not view['conclusion']['text']
+    assert artifact['report']['presentation']['executive_summary']==summary
     assert not view['pilots']
-    assert [group['title'] for group in view['priority_groups']] == ['После подготовки данных или интеграций']
-    assert 'До запуска' in view['conclusion']['text']
+    assert view['cards'][0]['category']=='medium'
+    assert view['cards'][0]['condition'] in render_markdown(artifact).replace('\\.','.')
 
 
 def test_summary_with_downgraded_assessment_cannot_promote_an_unjustified_pilot():
@@ -312,7 +315,7 @@ def test_summary_with_downgraded_assessment_cannot_promote_an_unjustified_pilot(
     view = management_view(artifact)
     assert 'Немедленно' not in view['conclusion']['text']
     assert 'немедленное' not in view['conclusion']['heading']
-    assert not view['pilots'] and view['priority_groups'][0]['title'] == 'Пока не запускать'
+    assert not view['pilots'] and 'Недостаточно оснований' in render_markdown(artifact)
 
 
 def test_comparative_queue_is_not_regrouped_by_category_in_any_full_format():
@@ -341,9 +344,8 @@ def test_comparative_queue_is_not_regrouped_by_category_in_any_full_format():
     # Only the independently testable third initiative is expanded, with concrete
     # input and the employee's result. It does not silently skip its queue number.
     assert [pilot['number'] for pilot in view['pilots']] == [3]
-    for text in texts:
-        assert rows[2]['input_materials'][0] in text
-        assert rows[2]['staff_result'] in text
+    assert view['details'][2]['input_materials']==rows[2]['input_materials']
+    assert view['details'][2]['staff_result']==rows[2]['staff_result']
 
 
 def test_full_process_map_keeps_groups_without_ai_and_context_is_not_an_operation():

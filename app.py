@@ -15,7 +15,7 @@ from govai.extraction import (
 from govai.url_input import extract_url_document
 from govai.process_ui import render_processes
 from govai.document_ui import document_header
-from govai.reference import match_reference, example_document_bytes
+from govai.reference import match_reference, example_document_bytes, example_pdf_bytes
 from govai.opportunity_ui import render_ready_report
 from govai.processes import ProcessError
 
@@ -114,23 +114,16 @@ def _load_input():
     )
     _localize_document_upload()
     if uploaded_file is None:
-        with st.expander('Пример: Росимущество №261', expanded=False):
-            st.caption('Полный текст редакции 30.05.2023. Загрузите этот файл, чтобы открыть проверенный разбор без обращения к модели.')
-            try:
-                sample = example_document_bytes()
-            except ProcessError:
-                st.caption('Пример временно недоступен. Можно загрузить свой документ.')
-            else:
-                st.download_button('Скачать исходник примера', sample,
-                                   file_name='rosimushchestvo-261.txt', mime='text/plain', on_click='ignore')
         return None
     encoding = 'utf-8-sig'
-    if Path(uploaded_file.name).suffix.lower() == '.txt':
-        with st.expander('Дополнительные настройки TXT', expanded=False):
-            label = st.selectbox('Кодировка TXT', options=list(TXT_ENCODINGS),
-                help='Если русские буквы отображаются неверно, выберите кодировку исходного файла.')
-        encoding = TXT_ENCODINGS[label]
     data = uploaded_file.getvalue()
+    if Path(uploaded_file.name).suffix.lower() == '.txt':
+        try:
+            data.decode('utf-8-sig')
+        except UnicodeError:
+            label = st.selectbox('Кодировка TXT', options=list(TXT_ENCODINGS),
+                help='Выберите кодировку, в которой сохранён этот текстовый файл.')
+            encoding = TXT_ENCODINGS[label]
     identity = (uploaded_file.name, sha256(data).hexdigest(), encoding)
     cached = st.session_state.get('document_read_cache')
     if cached and cached['identity'] == identity:
@@ -158,15 +151,33 @@ def _load_input():
         return None
 
 
+def _render_example():
+    with st.container(border=True):
+        st.write('Пример: Росимущество №261')
+        try:
+            pdf = example_pdf_bytes()
+            source = example_document_bytes()
+        except ProcessError:
+            st.info('Пример временно недоступен. Можно загрузить свой документ.')
+            return
+        st.download_button('Скачать готовый отчёт (PDF, 6 страниц)', pdf,
+            file_name='rosimushchestvo-261.pdf', mime='application/pdf',
+            type='primary', on_click='ignore', width='stretch')
+        st.download_button('Скачать текст НПА (TXT)', source,
+            file_name='rosimushchestvo-261.txt', mime='text/plain', on_click='ignore')
+
+
 def main() -> None:
-    st.set_page_config(page_title="GovAI — варианты для внедрения ИИ", page_icon="📄")
-    if not (st.session_state.get('process_result') or st.session_state.get('reference_result')):
-        st.title('Поиск вариантов для внедрения ИИ')
-        st.write('Загрузите документ в удобном формате. Агент изучит рабочий процесс '
-                 'и предложит рекомендации по оптимизации')
+    st.set_page_config(page_title="GovAI — варианты для внедрения AI", page_icon="📄")
+    heading = st.container()
     document = _load_input()
     if document is None:
         _clear_active_analysis()
+        with heading:
+            st.title('Поиск вариантов для внедрения AI')
+            st.write('Загрузите документ в удобном формате. Агент изучит рабочий процесс '
+                     'и предложит рекомендации по оптимизации')
+        _render_example()
         return
 
     identity = (document['source']['sha256'], sha256(document['text'].encode()).hexdigest(),
@@ -175,6 +186,11 @@ def main() -> None:
         _clear_active_analysis()
         st.session_state.active_document_key = identity
 
+    if not (st.session_state.get('process_result') or st.session_state.get('reference_result')):
+        with heading:
+            st.title('Поиск вариантов для внедрения AI')
+            st.write('Загрузите документ в удобном формате. Агент изучит рабочий процесс '
+                     'и предложит рекомендации по оптимизации')
     text = document["text"]
     if not text.strip():
         _clear_active_analysis()

@@ -91,7 +91,7 @@ def test_real_261_excerpts_three_grounded_initiatives_and_no_source_mutation():
                 for e in s['evidence_refs']:
                     assert result['report']['evidence'][e]==a.evidence[e]
     text=render_markdown(result)
-    for heading in ['Общая очередь ИИ-доработок','Карта процессов','Условия и основания']:
+    for heading in ['Рекомендации','Карта процессов','Основания:']:
         assert heading in text
     assert '270.00' not in text and '270 000' not in text
     assert '| Сценарий |' not in text
@@ -691,7 +691,7 @@ def test_quality_without_observations_keeps_metric_method_and_pilot_criterion():
     details=_read_markdown(render_details(result))
     assert 'Доля существенных доводов' in details and 'экспертная сверка' in details
     assert 'не пропущены существенные доводы' in details and '%' not in text
-    assert p['expected_effect'] in _read_markdown(text)
+    assert p['expected_effect'] in _read_markdown(render_details(result))
 
 
 @pytest.mark.parametrize('fault',['unknown_source','foreign_source','repeated_source','wrong_unit','claimed_user_measurement','claimed_document_measurement'])
@@ -892,11 +892,11 @@ def test_summary_names_actual_first_pilot_candidates_and_explains_non_ai_alterna
     rows[0]['prospect_assessment']=prospect_assessment(pilot_feasibility='bounded')
     result=generate_opportunities(n,a,OpportunityMock(plan(*rows)))
     text=render_markdown(result)
-    summary=text.split('## Общая очередь ИИ-доработок')[0]
+    summary=text.split('## Карта процессов')[0]
     assert rows[0]['title'] in summary
-    assert rows[1]['title'] not in summary
-    cases=text.split('## Первые доработки: работа инструмента и проверка')[1].split('## Условия и основания')[0]
-    assert rows[0]['measurement']['success_criterion'] in _read_markdown(cases) and 'специалист' in cases.casefold()
+    assert rows[1]['title'] in summary  # all accepted ideas, no extra summary card
+    cases=text.split('## Как работают инструменты')[1].split('## Ресурсы и эффект')[0]
+    assert rows[0]['measurement']['success_criterion'] in _read_markdown(cases) and 'специалист' in text.casefold()
     assert 'не только фиксированный шаблон' in cases or 'фиксированная схема полей' in cases
     details=render_details(result)
     assert rows[0]['non_ai_alternative'] in _read_markdown(details) and rows[0]['human_role'] in _read_markdown(details)
@@ -945,7 +945,7 @@ def test_docx_pdf_and_bundle_use_same_saved_report_with_complete_details_and_jso
     data=render_docx(artifact); pdf=render_pdf(artifact)
     document=Document(BytesIO(data))
     text=_docx_visible_text(document)
-    assert management_view(artifact)['conclusion']['heading'] in text and 'Условия и основания' in text
+    assert management_view(artifact)['conclusion']['heading'] in text and 'Основания:' in text
     assert 'Приложение с источниками' not in text
     for row in management_view(artifact)['initiatives']:
         assert f"№ {row['number']}. {row['title']}" in text
@@ -1430,13 +1430,13 @@ def test_management_exports_adapt_without_editorial_data_or_dropping_initiatives
     assert len(pdf.pages)>=1
     assert all(float(page.mediabox.width)==450 and float(page.mediabox.height)==800 for page in pdf.pages)
     assert all(len((page.extract_text() or '').strip())>80 for page in pdf.pages)
-    assert view['conclusion']['heading'] in text and 'Условия и основания' in text
+    assert ('Рекомендации' in text and 'Основания:' in text) if count else 'Обоснованных вариантов применения AI не найдено' in text
     assert '\ufffd' not in text and '…' not in markdown
     document=Document(BytesIO(render_docx(artifact)))
     assert document.styles['Normal'].font.size.pt>=11
     for row in view['initiatives']:
         assert row['title'] in markdown and row['title'] in text
-        assert row['category_label'] in text
+        assert row['category_label'] in ('Высокая','Средняя','Низкая','Недостаточно оснований')
         assert row['condition'] in _read_markdown(markdown)
         assert row['id'] in detailed
     if count:
@@ -1448,11 +1448,11 @@ def test_management_exports_adapt_without_editorial_data_or_dropping_initiatives
         body=_docx_visible_text(document)
         for item in view['initiatives']:
             assert f"№ {item['number']}. {item['title']}" in body
-            assert item['category_label'] in body
-            assert item['benefit'] in body and item['condition'] in body
+            assert item['category']==next(a['prospect']['category'] for a in artifact['report']['initiatives'] if a['id']==item['id'])
+            assert item['description'] in body and item['condition'] in body
     else:
         assert not view['pilots'] and not view['effects']
-        assert 'Обоснованных вариантов применения ИИ не найдено' in markdown
+        assert 'Обоснованных вариантов применения AI не найдено' in markdown
         assert 'Контролируемый тестовый ответ' not in markdown  # pre-validation model explanation is not a recommendation
         assert 'Эффект и границы расчёта' not in markdown and 'Эффект и границы расчёта' not in text
     for proof in artifact['report']['evidence'].values():
@@ -1480,18 +1480,16 @@ def test_saved_executive_summary_is_rendered_from_one_common_presentation():
     saved=rebuild_opportunities(json.dumps(original).encode(),n,a,'test-model',editorial_inputs=editorial,
         reason='Явная редакционная проработка сохранённого результата для управленческого обсуждения, без нового запроса модели.')
     view=management_view(saved)
-    assert view['requisites']=='Реквизиты не определены'
+    assert view['requisites']=='Документ'
     dated=deepcopy(saved)
     dated['report']['document'].update(act_type='Приказ',number='261',
         adoption_date='2020-09-11',revision_date='2023-05-30')
     assert management_view(dated)['requisites']=='Приказ № 261 от 11.09.2020 · редакция 30.05.2023'
-    sentences=[sentence.rstrip('.') for sentence in re.split(r'(?<=\.)\s+',summary)]
-    assert all(sentence in json.dumps(view,ensure_ascii=False) for sentence in sentences)
-    assert all(sentence in _read_markdown(render_markdown(saved)) for sentence in sentences)
-    word=Document(BytesIO(render_docx(saved)))
-    assert all(sentence in _docx_visible_text(word) for sentence in sentences)
-    pdf=PdfReader(BytesIO(render_pdf(saved)))
-    assert all(sentence in ' '.join(' '.join(page.extract_text() for page in pdf.pages).split()) for sentence in sentences)
+    assert saved['report']['presentation']['executive_summary']==summary
+    assert not view['summary_intro']
+    for text in (_read_markdown(render_markdown(saved)), _docx_visible_text(Document(BytesIO(render_docx(saved)))), ' '.join(p.extract_text() for p in PdfReader(BytesIO(render_pdf(saved))).pages)):
+        assert view['cards'][0]['title'] in text
+        assert summary not in text
     assert saved['plan']==original['plan'] and saved['metrics']['requests']==0
     assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==saved
 
@@ -1823,7 +1821,7 @@ def test_comparative_rank_uses_validated_order_and_dependencies_not_categories_o
     assert items[1]['input_materials']==ready.proposals[1].input_materials
     assert items[1]['staff_result']==ready.proposals[1].staff_result
     assert result['compatibility']['plan_contract_version']=='2.4'
-    assert result['compatibility']['prompt_version']=='opportunities-2.4'
+    assert result['compatibility']['prompt_version']=='opportunities-2.5'
     assert result['report']['presentation']['ordering_origin']=='model_comparison_checked'
     assert all(row['priority']['reason'] and row['priority']['change_condition'] for row in items)
     assert all('score' not in row['priority'] and 'weight' not in row['priority'] for row in items)
@@ -1993,4 +1991,23 @@ def test_historical_reassembly_does_not_claim_comparative_evidence():
     saved=generate_opportunities(normalized,analysis,OpportunityMock(presented_plan(proposal(normalized))))
     assert saved['report']['initiatives'][0]['priority']['origin']=='historical_unranked'
     note=management_view(saved)['ordering_note']
-    assert 'сопоставимых данных' in note and 'она сопоставляет' not in note
+    assert 'сопоставимых оснований' in note and 'она сопоставляет' not in note
+
+
+def test_previous_ranked_prompt_restores_report_and_pending_plan_without_generation(monkeypatch):
+    import govai.opportunities as module
+    _,_,a,n=simple_map()
+    pending=[]
+    with monkeypatch.context() as old:
+        old.setattr(module,'PROMPT_VERSION',module.PREVIOUS_RANKED_PROMPT_VERSION)
+        old.setattr(module,'PROMPT_SHA256',module.PREVIOUS_RANKED_PROMPT_SHA256)
+        saved=generate_opportunities(n,a,OpportunityMock(ranked_plan(proposal(n))),on_plan=pending.append)
+    before=deepcopy(saved)
+    assert saved['compatibility']['prompt_version']=='opportunities-2.4'
+    assert restore_opportunities(json.dumps(saved).encode(),n,a,'test-model')==before
+    checked=module.restore_opportunity_plan(json.dumps(pending[0]).encode(),n,a,'test-model')
+    rebuilt=generate_opportunities(n,a,None,model='test-model',provider_name='openai',saved_plan=checked)
+    assert rebuilt['report']==saved['report']
+    assert rebuilt['compatibility']['prompt_version']=='opportunities-2.4'
+    corrupted=deepcopy(saved);corrupted['compatibility']['prompt_sha256']='0'*64
+    with pytest.raises(ProcessError):restore_opportunities(json.dumps(corrupted).encode(),n,a,'test-model')

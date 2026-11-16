@@ -1,4 +1,4 @@
-"""Report generation and display; imports and diagnostics stay in the technical section."""
+"""Single report stage and public cards/PDF; recovery remains session-bound."""
 
 import json
 import base64
@@ -14,12 +14,10 @@ from govai.analysis_io import digest
 from govai.llm import OpenAIOpportunityProvider, configuration
 from govai.opportunities import (OpportunityError, compatibility, generate_opportunities,
                                  restore_opportunities, operational_action_ids,
-                                 export_opportunity_plan, restore_opportunity_plan,
-                                 rebuild_opportunities, SOURCE_VALIDATION_VERSION)
+                                 restore_opportunity_plan)
 from govai.opportunity_report import (management_view, render_markdown, render_details,
                                       _safe as escape_text)
 from govai.processes import ProcessError
-from govai.document_ui import analysis_error_message, technical_document
 from govai.map_ui import request_timing
 from govai.report_export import EXPORT_VERSION, render_pdf, render_docx, render_bundle, pdf_layout_status
 
@@ -89,14 +87,15 @@ def opportunity_state(normalized):
 
 
 
-def _exports(key, artifact):
+def _exports(key, artifact, *, public=False):
     """Prepare each format once per result/version, including failed outcomes.
 
     Reopening the technical section or downloading must not repeat rendering.
     Explicit restoration clears this cache and permits a new local attempt.
     """
     cache = st.session_state.setdefault('opportunity_exports', {})
-    fingerprint = digest({'artifact': artifact, 'export_version': EXPORT_VERSION})
+    fingerprint = digest({'artifact': artifact, 'export_version': EXPORT_VERSION, 'public': public})
+    key = ('public-' if public else '') + key
     saved = cache.get(key)
     if saved and saved['fingerprint'] == fingerprint:
         return saved
@@ -114,6 +113,8 @@ def _exports(key, artifact):
         'docx': ('DOCX', lambda: render_docx(artifact, view=files['view'])),
         'pdf': ('PDF', lambda: render_pdf(artifact, view=files['view'])),
     }
+    if public:
+        preparation = {'pdf': preparation['pdf']}
     for name, (label, prepare) in preparation.items():
         try:
             if files['view'] is None and name in ('markdown', 'docx', 'pdf'):
@@ -132,7 +133,7 @@ def _exports(key, artifact):
             files['pdf'] = None
             files['failed'].append('PDF')
             files['errors'].append(_export_failure('Проверка PDF', exc))
-    if files['json'] is not None:
+    if not public and files['json'] is not None:
         try:
             files['zip'] = render_bundle(artifact, pdf_data=files['pdf'], docx_data=files['docx'],
                 markdown_data=files['markdown'], json_data=files['json'], details_data=files['details'],
@@ -145,156 +146,48 @@ def _exports(key, artifact):
     return files
 
 
-def _source_downloads(files, *, prefix, include_pdf=False, reference=False):
-    """Fallback and technical exports remain independently available."""
-    formats = [
-        ('docx', 'Скачать отчёт (DOCX)', 'opportunity-report.docx',
-         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
-        ('markdown', 'Скачать Markdown', 'opportunity-report.md', 'text/markdown'),
-        ('details', 'Скачать подробные материалы', 'opportunity-details.txt', 'text/plain'),
-        ('json', 'Скачать данные анализа (JSON)', 'reference-result.json' if reference else 'opportunities.json', 'application/json'),
-    ]
-    if include_pdf:
-        formats.insert(0, ('pdf', 'Скачать отчёт PDF', 'opportunity-report.pdf', 'application/pdf'))
-    for name, label, filename, mime in formats:
-        if files[name] is not None:
-            st.download_button(label, files[name], file_name=filename, mime=mime,
-                               on_click='ignore', key=prefix+'-'+name, width='stretch')
-
-
-@st.fragment(run_every=1)
-def _wait_for_report(key):
-    # A fast rerun may display this while the original request is finishing in
-    # its stopped script. Poll only session state, never the provider.
-    if key not in st.session_state.get('opportunity_in_flight', {}):
-        return st.rerun(scope='app')
-    st.info('Отчёт формируется. Повторный запрос не отправляется; дождитесь завершения текущего анализа.')
-    started = st.session_state.get('opportunity_started', {}).get(key)
-    if started is not None:
-        st.caption(f'Прошло {max(0, int(time.perf_counter() - started))} с. Подготавливаем рекомендации и проверяем их источники.')
-
-
-def render_opportunities(normalized, analysis):
+def prepare_opportunity_report(normalized, analysis):
+    """Run the existing final stage once; session state owns recovery, not the UI."""
     key, model, provider_name, reports = opportunity_state(normalized)
+    if key in reports:
+        return reports[key]
     plans = st.session_state.setdefault('opportunity_plans', {})
     failures = st.session_state.setdefault('opportunity_failures', {})
     in_flight = st.session_state.setdefault('opportunity_in_flight', {})
-    pending = plans.get(key)
-    artifact = reports.get(key)
-    if not artifact:
-        if key in in_flight:
-            _wait_for_report(key)
-            return
-        if key in failures:
-            st.error('Отчёт не сформирован: ' + analysis_error_message(failures[key]['message']))
-            st.info('План сохранён в этой сессии. Повторите сборку без нового запроса к модели.' if pending else
-                    'Процессы сохранены. Устраните указанную причину и повторите формирование отчёта.')
-        if pending:
-            try:
-                backup = export_opportunity_plan(pending, normalized, analysis, model, provider_name)
-                st.download_button('Скачать резервный план', backup, file_name='opportunities-plan.json',
-                                   mime='application/json', on_click='ignore', width='stretch')
-                st.caption('Это структурированный план для повторной сборки, ещё не готовый отчёт. '
-                           'Скачанная копия позволяет продолжить в новой сессии с теми же документом и картой.')
-            except ProcessError as exc:
-                st.warning('Резервный план не прошёл проверку: ' + str(exc))
-        label = 'Повторить сборку без API' if pending else 'Сформировать отчёт'
-        if st.button(label, type='primary'):
-            # A queued second click must reuse the result or saved plan. The session
-            # guard also covers overlapping reruns while the provider is still busy.
-            if key in reports:
-                st.rerun()
-            owner = uuid4().hex
-            if in_flight.setdefault(key, owner) != owner:
-                st.info('Отчёт уже формируется. Повторный запрос не отправлен.')
-                return
-            pending = plans.get(key)
-            provider = None; started = time.perf_counter()
-            st.session_state.setdefault('opportunity_started', {})[key] = started
-            try:
-                if pending is None and operational_action_ids(normalized['map']):
-                    try: secrets = st.secrets.to_dict()
-                    except FileNotFoundError: secrets = {}
-                    secret, configured_model = configuration(secrets)
-                    provider = OpenAIOpportunityProvider(secret, configured_model)
-                with st.spinner('Готовим рекомендации и проверяем источники…' if pending is None else
-                                'Собираем отчёт из сохранённого плана…', show_time=True):
-                    result = generate_opportunities(normalized, analysis, provider, model=model,
-                        provider_name=provider_name, saved_plan=pending,
-                        on_plan=lambda plan: plans.update({key: plan}))
-                    # Streamlit may interrupt at the spinner's exit on a queued
-                    # rerun. Save the result before the next UI yield point.
-                    reports[key] = result
-                    plans.pop(key, None); failures.pop(key, None)
-                st.session_state.setdefault('opportunity_origins', {})[key] = 'generated'
-            except ProcessError as exc:
-                metrics = exc.metrics if isinstance(exc, OpportunityError) else {
-                    'requests': 0, 'elapsed_seconds': time.perf_counter()-started, 'usage': None}
-                failures[key] = {**metrics, 'message': str(exc)}
-            finally:
-                try:
-                    if provider: provider.close()
-                finally:
-                    elapsed = time.perf_counter() - started
-                    wait = getattr(provider, 'last_call_elapsed_seconds', None) if provider else 0.0
-                    st.session_state.setdefault('opportunity_stage_metrics', {})[key] = {
-                        'elapsed_seconds': elapsed, **request_timing(elapsed, wait),
-                    }
-                    if in_flight.get(key) == owner:
-                        in_flight.pop(key, None)
-                    st.session_state.get('opportunity_started', {}).pop(key, None)
-            st.rerun()
-        return
-    render_ready_report(key, artifact)
-
-
-def render_ready_report(key, artifact, *, document=None):
-    """One result screen for verified references and newly generated reports."""
-    reference = artifact.get('kind') == 'govai_verified_reference'
-    # All presentations share a cached view and already prepared bytes.
-    files = _exports(key, artifact)
-    st.success(files['view']['reference_label'] if reference and files['view'] else 'Отчёт готов.')
-    if (files.get('pdf_layout') or {}).get('exceeded'):
-        st.warning(files['pdf_layout']['message'])
-    st.caption('В полном отчёте — карта процессов, подробные предложения и расчёт экономики')
-    if files['pdf'] is not None:
-        pages = files['pdf_layout']['pages']
-        ending = 'страница' if pages % 10 == 1 and pages % 100 != 11 else 'страницы' if pages % 10 in (2, 3, 4) and pages % 100 not in (12, 13, 14) else 'страниц'
-        st.download_button(f'Скачать полный отчёт (PDF, {pages} {ending})', files['pdf'], type='primary',
-                           file_name='opportunity-report.pdf', mime='application/pdf',
-                           on_click='ignore', width='stretch')
-    if files['zip'] is not None:
-        label = 'Скачать доступные материалы ZIP' if files['failed'] else 'Скачать все материалы ZIP'
-        st.download_button(label, files['zip'], file_name='govai-results.zip', mime='application/zip',
-                           on_click='ignore', width='stretch')
-    if files['failed']:
-        st.warning('Не удалось подготовить: ' + ', '.join(files['failed']) +
-                   '. Остальные файлы доступны. Повторный запрос к модели не нужен. '
-                   + ('Сохраните JSON; после его восстановления можно повторить локальную подготовку файлов.'
-                      if files['json'] is not None else 'Сохраните доступные документы; полный JSON сейчас подготовить не удалось.'))
-        for error in files.get('errors', []):
-            st.caption(error['format'] + ': ' + error['reason'])
-        _source_downloads(files, prefix='fallback', reference=reference)
-    st.caption('Сохраните архив: он содержит отчёт и полный JSON для восстановления. '
-               'Без скачанной копии результат может быть потерян после завершения сессии.')
-    view = files['view']
-    if view is None:
-        st.info('Не удалось подготовить краткое представление. Сохранённый JSON и доступные форматы можно скачать выше.')
-        return
-    outcome = view['outcome']
-    if outcome['state'] in ('rejected', 'partial', 'unfinished'):
-        st.warning(outcome['message'])
-        st.info(outcome['action'])
-    elif outcome['state'] == 'none':
-        st.info(outcome['message'])
-    _render_management(view)
-    if reference:
-        with st.expander('Технические данные', expanded=False):
-            st.caption('Сохранённый утверждённый разбор. Новые запросы к модели не выполнялись.')
-            _source_downloads(files, prefix='reference', reference=True)
-            st.caption('PDF совпадает с утверждённым файлом; JSON имеет отдельный формат проверенного разбора.')
-            if document is not None:
-                technical_document(document)
+    owner = uuid4().hex
+    if in_flight.setdefault(key, owner) != owner:
+        raise ProcessError('Отчёт уже формируется. Дождитесь завершения анализа.')
+    provider = None; started = time.perf_counter()
+    st.session_state.setdefault('opportunity_started', {})[key] = started
+    try:
+        pending = plans.get(key)
+        if pending is None and operational_action_ids(normalized['map']):
+            try: secrets = st.secrets.to_dict()
+            except FileNotFoundError: secrets = {}
+            secret, configured_model = configuration(secrets)
+            provider = OpenAIOpportunityProvider(secret, configured_model)
+        result = generate_opportunities(normalized, analysis, provider, model=model,
+            provider_name=provider_name, saved_plan=pending,
+            on_plan=lambda plan: plans.update({key: plan}))
+        reports[key] = result
+        plans.pop(key, None); failures.pop(key, None)
+        st.session_state.setdefault('opportunity_origins', {})[key] = 'generated'
+        return result
+    except ProcessError as exc:
+        metrics = exc.metrics if isinstance(exc, OpportunityError) else {
+            'requests': 0, 'elapsed_seconds': time.perf_counter()-started, 'usage': None}
+        failures[key] = {**metrics, 'message': str(exc)}
+        raise
+    finally:
+        try:
+            if provider: provider.close()
+        finally:
+            elapsed = time.perf_counter()-started
+            wait = getattr(provider, 'last_call_elapsed_seconds', None) if provider else 0.0
+            st.session_state.setdefault('opportunity_stage_metrics', {})[key] = {
+                'elapsed_seconds': elapsed, **request_timing(elapsed, wait)}
+            if in_flight.get(key) == owner: in_flight.pop(key, None)
+            st.session_state.get('opportunity_started', {}).pop(key, None)
 
 
 def _render_management(view):
@@ -311,101 +204,46 @@ def _render_management(view):
     @media(max-width:600px){div[class*="st-key-govai_card_"]{padding:0.9rem;}.govai-card-heading{gap:0.65rem;}}
     </style>""")
     cards = view.get('cards', [])
-    st.subheader(view.get('summary_heading') or 'Очередь ИИ-доработок')
-    if view.get('summary_intro'):
-        st.write(escape_text(view['summary_intro']))
-    if view.get('input_limitation'):
-        st.caption(escape_text(view['input_limitation']))
     for card in cards:
-        number = card['rank']
-        with st.container(key=f'govai_card_{number}'):
-            # Only an integer rank and HTML-escaped display text enter this markup.
-            st.markdown('<div class="govai-card-heading"><span>' + str(number) +
+        with st.container(key=f"govai_card_{card['rank']}"):
+            st.markdown('<div class="govai-card-heading"><span>' + str(card['rank']) +
                         '</span><strong>' + html_escape(card['title']) + '</strong></div>',
                         unsafe_allow_html=True)
-            context = [card[field] for field in ('process', 'category_label') if card.get(field)]
-            if context:
-                st.caption(escape_text(' · '.join(context)))
             st.write(escape_text(card['description']))
-            if card.get('effect'):
-                st.write(escape_text(card['effect']))
-            if card.get('resources'):
-                st.caption(escape_text(card['resources']))
-            if card.get('priority_reason'):
-                st.caption('Очередность: ' + escape_text(card['priority_reason']))
-            if card.get('condition'):
-                st.caption('Условие: ' + escape_text(card['condition']))
-    if not cards and view.get('outcome', {}).get('state') not in ('none', 'rejected', 'unfinished'):
-        st.info('Подходящие ИИ-доработки не определены. Объяснение и основания сохранены в полном отчёте.')
-    if cards:
-        st.caption('Это предварительная очередь. Ожидаемый эффект и ресурсные предпосылки нужно проверить; '
-                   'решения и утверждение документов остаются за уполномоченным сотрудником.')
+            figures = [card[field] for field in ('effect', 'resources') if card.get(field) and card[field] != card['description']]
+            if figures: st.write(escape_text(' '.join(figures)))
+            if card.get('priority_reason'): st.write(escape_text(card['priority_reason']))
+            if card.get('condition') and card['condition'] not in card['description']:
+                st.write(escape_text(card['condition']))
 
 
-def render_opportunity_technical(normalized, analysis):
-    key, model, provider_name, reports = opportunity_state(normalized)
-    st.subheader('Отчёт: восстановление и диагностика')
-    uploaded = st.file_uploader('Готовый opportunities.json', type=['json'], max_upload_size=64,
-                               key='opportunities-upload')
-    busy = key in st.session_state.get('opportunity_in_flight', {})
-    if st.button('Восстановить отчёт', disabled=uploaded is None or busy):
-        try:
-            reports[key] = restore_opportunities(uploaded.getvalue(), normalized, analysis, model, provider_name)
-            st.session_state.setdefault('opportunity_exports', {}).pop(key, None)
-            st.session_state.setdefault('opportunity_origins', {})[key] = 'imported'
-            st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
-            st.session_state.setdefault('opportunity_plans', {}).pop(key, None)
+
+def render_ready_report(key, artifact, *, document=None):
+    """One public result screen; only the PDF is prepared for visitors."""
+    files = _exports(key, artifact, public=True)
+    view = files['view']
+    if view is None:
+        st.error('Не удалось подготовить представление отчёта. Полученный анализ сохранён; сообщите владельцу приложения.')
+        return
+    if view.get('reference_label'):
+        st.caption(view['reference_label'])
+    outcome = view.get('outcome', {})
+    if outcome.get('state') in ('rejected', 'partial', 'unfinished', 'none'):
+        from govai.opportunity_report import business_text
+        st.info(business_text(outcome['message']))
+    st.subheader('Рекомендации')
+    st.write(f"Найдено рекомендаций: {len(view['cards'])}")
+    _render_management(view)
+    st.caption('Полный отчёт содержит карту процессов, подробные предложения и расчёт экономики')
+    if files['pdf'] is not None:
+        pages = files['pdf_layout']['pages']
+        ending = ('страница' if pages % 10 == 1 and pages % 100 != 11 else
+                  'страницы' if pages % 10 in (2, 3, 4) and pages % 100 not in (12, 13, 14) else 'страниц')
+        st.download_button(f'Скачать полный отчёт (PDF, {pages} {ending})', files['pdf'],
+            file_name='opportunity-report.pdf', mime='application/pdf', type='primary',
+            on_click='ignore', width='stretch')
+    else:
+        st.warning('Не удалось подготовить PDF. Рекомендации сохранены; можно повторить подготовку файла без нового анализа.')
+        if st.button('Повторить подготовку PDF'):
+            st.session_state.get('opportunity_exports', {}).pop('public-' + key, None)
             st.rerun()
-        except ProcessError as exc: st.error('Восстановление отчёта: ' + str(exc))
-    plan_upload = st.file_uploader('Резервный opportunities-plan.json', type=['json'], max_upload_size=64,
-                                  key='opportunity-plan-upload')
-    if st.button('Восстановить план без API', disabled=plan_upload is None or busy or key in reports):
-        try:
-            restored = restore_opportunity_plan(plan_upload.getvalue(), normalized, analysis, model, provider_name)
-            st.session_state.setdefault('opportunity_plans', {})[key] = restored
-            st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
-            st.rerun()
-        except ProcessError as exc: st.error('Восстановление плана: ' + str(exc))
-    artifact = reports.get(key)
-    if artifact:
-        if artifact['compatibility'].get('source_validation_version') != SOURCE_VALIDATION_VERSION:
-            st.caption('Сохранённый отчёт использует прежний контракт источников. '
-                       'Можно заново проверить основную операцию и её контекст без обращения к модели.')
-            if st.button('Повторно проверить источники без API', disabled=busy):
-                try:
-                    rebuilt = rebuild_opportunities(json.dumps(artifact, ensure_ascii=False).encode(),
-                        normalized, analysis, model, provider_name,
-                        reason='Локальная повторная проверка доказательств основной операции и явно указанного контекста по обновлённому контракту; новый ответ модели не запрашивался.')
-                    reports[key] = rebuilt
-                    st.session_state.setdefault('opportunity_origins', {})[key] = 'restored_session'
-                    st.session_state.setdefault('opportunity_exports', {}).pop(key, None)
-                    st.rerun()
-                except ProcessError as exc:
-                    st.error('Повторная проверка не завершена: ' + analysis_error_message(str(exc)))
-        files = _exports(key, artifact)
-        _source_downloads(files, prefix='technical')
-        st.caption(f"Подготовка файлов: {files['elapsed_seconds']:.2f} с. Повторное открытие использует готовые файлы.")
-        if files.get('errors'):
-            st.caption('Причины ошибок подготовки файлов; повторный анализ не требуется.')
-            st.json(files['errors'])
-        st.caption('Отчёт восстановлен без API.' if st.session_state.get('opportunity_origins', {}).get(key) in ('imported', 'restored_session')
-                   else 'Отчёт сформирован в текущей сессии.')
-        st.json(artifact['metrics'])
-        st.caption('Метрики относятся к сохранённому запуску; локальная пересборка не создаёт API-запросов.')
-        measured = st.session_state.get('opportunity_stage_metrics', {}).get(key)
-        if measured:
-            st.caption('Время текущего этапа: API включает сеть и ожидание ответа, остальное — локальная обработка.')
-            st.json(measured)
-    pending = st.session_state.get('opportunity_plans', {}).get(key)
-    if pending:
-        st.info('Структурированный план сохранён в памяти сессии, но отчёт ещё не готов. '
-                'Скачайте резервный план на основном экране: без копии после потери сессии он недоступен.')
-        st.json(pending['metrics'])
-        if st.button('Удалить план для нового запроса', disabled=busy,
-                     help='Только удаление. Новый платный запрос возможен после нажатия «Сформировать отчёт».'):
-            st.session_state.opportunity_plans.pop(key, None)
-            st.session_state.setdefault('opportunity_failures', {}).pop(key, None)
-            st.rerun()
-    if key in st.session_state.get('opportunity_failures', {}):
-        st.caption('Последняя ошибка формирования отчёта')
-        st.json(st.session_state.opportunity_failures[key])

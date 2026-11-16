@@ -39,16 +39,14 @@ def run_with_upload(filename, data):
 def test_initial_screen():
     app = AppTest.from_file(str(APP)).run(timeout=15)
     assert not app.exception
-    assert app.title[0].value == 'Поиск вариантов для внедрения ИИ'
+    assert app.title[0].value == 'Поиск вариантов для внедрения AI'
     assert any(item.value == 'Загрузите документ в удобном формате. Агент изучит рабочий процесс '
                'и предложит рекомендации по оптимизации' for item in app.markdown)
     assert app.radio[0].label == 'Способ загрузки'
     assert not app.subheader
-    assert [e.label for e in app.expander] == ['Пример: Росимущество №261']
-    example = app.expander[0]
-    assert not example.proto.expanded
-    assert [b.label for b in example.get('download_button')] == ['Скачать исходник примера']
-    assert example.get('download_button')[0].proto.ignore_rerun
+    assert not app.expander
+    assert [b.label for b in app.get('download_button')] == ['Скачать готовый отчёт (PDF, 6 страниц)', 'Скачать текст НПА (TXT)']
+    assert all(b.proto.ignore_rerun for b in app.get('download_button'))
     assert not any('Скан без распознанного текста' in item.value for item in app.caption)
     uploader = app.get('file_uploader')[0].proto
     assert uploader.label == 'Выберите документ' and uploader.max_upload_size_mb == 10
@@ -70,21 +68,21 @@ def test_txt_upload_displays_text():
     app = run_with_upload("example.txt", "Тестовый документ".encode())
     assert not app.exception
     assert app.success
-    assert app.text_area[0].value == "Тестовый документ"
+    assert app.session_state['document_read_cache']['document']['text'] == "Тестовый документ"
 
 
 def test_pdf_upload_displays_text(pdf_bytes):
     app = run_with_upload("example.pdf", pdf_bytes)
     assert not app.exception
-    assert "First page: procurement" in app.text_area[0].value
-    assert "Second page: deadline" in app.text_area[0].value
+    assert "First page: procurement" in app.session_state['document_read_cache']['document']['text']
+    assert "Second page: deadline" in app.session_state['document_read_cache']['document']['text']
 
 
 def test_docx_upload_displays_text(docx_bytes):
     app = run_with_upload("example.docx", docx_bytes)
     assert not app.exception
-    assert "Условия закупки" in app.text_area[0].value
-    assert "30 ноября" in app.text_area[0].value
+    assert "Условия закупки" in app.session_state['document_read_cache']['document']['text']
+    assert "30 ноября" in app.session_state['document_read_cache']['document']['text']
 
 
 @pytest.mark.parametrize("filename,data", [("broken.pdf", b"broken"), ("empty.txt", b"")])
@@ -106,18 +104,18 @@ def test_real_npa_structure_is_visible():
     sample = APP.parent / 'examples/rosimushchestvo_261/source.txt'
     app = run_with_upload('source.txt', sample.read_bytes())
     assert not app.exception
-    assert any(h.value == 'Структура документа' for h in app.subheader)
-    rendered = '\n'.join(item.value for item in app.markdown)
-    assert 'Номер: 261' in rendered
-    assert 'Редакция: 2023-05-30' in rendered
-    assert '2.6.' in app.dataframe[0].value['Пункт'].values
+    assert any(h.value == 'Приказ № 261' for h in app.subheader)
+    assert any('30.05.2023' in c.value for c in app.caption)
+    assert not app.dataframe and not app.text_area
+    assert any(c['marker'] == '2.6.' for c in app.session_state['document_read_cache']['document']['clauses'])
 
 
 def test_unrecognized_structure_preserves_text_in_ui():
     app = run_with_upload('ordinary.txt', 'Обычный текст без нумерации.'.encode())
     assert not app.exception
-    assert 'Нумерованные пункты не распознаны' in app.info[0].value
-    assert app.text_area[0].value == 'Обычный текст без нумерации.'
+    assert not app.text_area
+    assert 'numbered_clauses_not_recognized' in app.session_state['document_read_cache']['document']['warnings']
+    assert app.session_state['document_read_cache']['document']['text'] == 'Обычный текст без нумерации.'
 
 
 def url_result():
@@ -137,9 +135,9 @@ def test_url_mode_loads_html_and_does_not_refetch_on_rerun():
         app.button[0].click().run()
         assert not app.exception
         technical(app)
-        assert 'Заявитель направляет заявление' in app.text_area[0].value
+        assert 'Заявитель направляет заявление' in app.session_state['url_document']['text']
         assert 'Полнота НПА автоматически не подтверждена' in app.warning[0].value
-        assert len(app.get('download_button')) == 1
+        assert not app.get('download_button')
         app.run()
         fetch.assert_called_once_with('https://public.example.org/doc')
 
@@ -151,7 +149,7 @@ def test_url_change_and_failed_retry_clear_old_document():
     with patch('govai.url_input.extract_url_document', return_value=url_result()):
         app.button[0].click().run()
     technical(app)
-    assert app.text_area
+    assert 'url_document' in app.session_state
     app.text_input[0].set_value('https://public.example.org/other').run()
     assert not app.text_area
     with patch('govai.url_input.extract_url_document', side_effect=URLInputError('HTTP 403: доступ запрещён')):
@@ -159,7 +157,7 @@ def test_url_change_and_failed_retry_clear_old_document():
     assert not app.exception
     assert '403' in app.error[0].value
     assert not app.text_area
-    assert not app.get('download_button')
+    assert [b.label for b in app.get('download_button')] == ['Скачать готовый отчёт (PDF, 6 страниц)', 'Скачать текст НПА (TXT)']
 
 
 def test_url_mode_blocks_local_address_without_network():
@@ -183,12 +181,7 @@ def test_file_reading_is_cached_per_file_content_and_encoding():
         app.run()
         technical(app)
         assert read.call_count == 1
-        settings = next(e for e in app.expander if e.label == 'Дополнительные настройки TXT')
-        assert not settings.proto.expanded
-        next(s for s in app.selectbox if s.label == 'Кодировка TXT').set_value('Windows-1251').run()
-        assert read.call_count == 2
-        app.run()
-        assert read.call_count == 2
+        assert not app.expander and not app.selectbox
     changed = UploadedFile(UploadedFileRec('source', 'source.txt', 'text/plain',
         'Другой текст того же файла.'.encode()), FileURLs())
     with patch('streamlit.file_uploader', return_value=changed), \
@@ -216,10 +209,9 @@ def test_document_requisites_unknown_and_full_title_not_truncated():
     assert any('Редакция: не определена' in c.value for c in app.caption)
     source = APP.parent/'examples/rosimushchestvo_261/source.txt'
     real = run_with_upload('source.txt', source.read_bytes())
-    full_title = next(e for e in real.expander if e.label == 'Полное название документа')
-    assert not full_title.proto.expanded
-    assert 'без проведения торгов' in '\n'.join(x.value for x in full_title.markdown)
-    assert '…' not in '\n'.join(x.value for x in full_title.markdown)
+    assert not any(e.label == 'Полное название документа' for e in real.expander)
+    assert 'без проведения торгов' in real.session_state['document_read_cache']['document']['metadata']['title']['value']
+
 
 
 @pytest.mark.parametrize('message,expected', [
@@ -268,24 +260,18 @@ def test_full_approved_source_shows_seven_cards_and_exact_pdf_without_provider(m
         app = AppTest.from_file(str(APP)).run(timeout=15)
         assert not app.exception and not app.error
         assert _reference_card_numbers(app) == list(range(1, 8))
-        assert any('Проверенный разбор · редакция 30.05.2023' in s.value for s in app.success)
+        assert any('Проверенный разбор · редакция 30.05.2023' in s.value for s in app.caption)
         assert not any(b.label in ('Извлечь процессы', 'Сформировать отчёт') for b in app.button)
         assert 'process_result' not in app.session_state
         label = 'Скачать полный отчёт (PDF, 6 страниц)'
         prepared = {call.args[0]: call.args[1] for call in downloads.call_args_list if call.args}
         assert sha256(prepared[label]).hexdigest() == PDF_SHA256
-        with ZipFile(BytesIO(prepared['Скачать все материалы ZIP'])) as archive:
-            assert archive.testzip() is None
-            assert archive.read('opportunity-report.pdf') == prepared[label]
-            saved = archive.read('reference-result.json')
-            artifact = restore_reference_result(saved, extract_document(filename, data))
-            assert artifact == app.session_state['reference_result']
+        assert len(app.get('download_button')) == 1
         assert all(b.proto.ignore_rerun for b in app.get('download_button'))
         assert all(not b.proto.HasField('deferred_file_id') for b in app.get('download_button'))
         cached = next(iter(app.session_state['opportunity_exports'].values()))
-        technical(app, fragments=True)
-        assert '2.6.' in app.dataframe[0].value['Пункт'].values
-        assert app.text_area[0].value == data.decode()
+        assert not app.text_area and not app.dataframe
+        assert not any(e.label == 'Технические данные' for e in app.expander)
         app.run(); app.run()
         assert next(iter(app.session_state['opportunity_exports'].values())) is cached
         assert _reference_card_numbers(app) == list(range(1, 8))
@@ -309,7 +295,7 @@ def test_similar_or_same_named_document_uses_ordinary_path_without_reference(var
         app = AppTest.from_file(str(APP)).run(timeout=15)
         assert not app.exception
         assert 'reference_result' not in app.session_state
-        assert any(b.label == 'Извлечь процессы' for b in app.button)
+        assert any(b.label == 'Проанализировать документ' for b in app.button)
         assert not _reference_card_numbers(app)
         assert not any(b.label.startswith('Скачать полный отчёт') for b in app.get('download_button'))
         provider.assert_not_called()
@@ -329,15 +315,41 @@ def test_reference_then_changed_failed_or_removed_upload_hides_previous_result(n
         assert not app.exception
         assert 'reference_result' not in app.session_state
         assert not _reference_card_numbers(app)
-        assert not any('Проверенный разбор' in s.value for s in app.success)
+        assert not any('Проверенный разбор' in s.value for s in app.caption)
         assert not any(b.label.startswith('Скачать полный отчёт') or b.label == 'Скачать все материалы ZIP'
                        for b in app.get('download_button'))
         # Recovery bytes may remain source-bound in the cache, but must not render.
-        assert 'reference-' + old_id in app.session_state['opportunity_exports']
+        assert 'public-reference-' + old_id in app.session_state['opportunity_exports']
         if next_input == 'broken':
             assert app.error and 'Не удалось прочитать PDF' in app.error[0].value
         if next_input == 'other':
-            assert any(b.label == 'Извлечь процессы' for b in app.button)
+            assert any(b.label == 'Проанализировать документ' for b in app.button)
         app.run(timeout=15)
         assert not _reference_card_numbers(app)
+        provider.assert_not_called()
+
+
+def test_non_utf8_txt_allows_explicit_encoding_only_when_needed():
+    value=_file('legacy.txt','Русский текст в старой кодировке.'.encode('cp1251'))
+    with patch('streamlit.file_uploader',return_value=value):
+        app=AppTest.from_file(str(APP)).run()
+        assert app.error
+        app.selectbox[0].set_value('Windows-1251').run()
+        assert not app.error and not app.exception
+        assert app.session_state['document_read_cache']['document']['text']=='Русский текст в старой кодировке.'
+        app.run(); assert not app.error
+
+
+@pytest.mark.parametrize('mode',['Загрузить файл','Загрузить по ссылке'])
+def test_start_example_is_exact_v4_without_input_or_provider(mode):
+    import streamlit as st
+    from govai.reference import PDF_SHA256
+    with patch('govai.llm.OpenAIProvider.__init__',side_effect=AssertionError('No API')) as provider, \
+         patch('streamlit.download_button',wraps=st.download_button) as downloads:
+        app=AppTest.from_file(str(APP)).run()
+        app.radio[0].set_value(mode).run()
+        prepared={c.args[0]:c.args[1] for c in downloads.call_args_list if c.args}
+        assert sha256(prepared['Скачать готовый отчёт (PDF, 6 страниц)']).hexdigest()==PDF_SHA256
+        assert prepared['Скачать текст НПА (TXT)']==_reference_source()
+        assert not app.expander and not app.json
         provider.assert_not_called()

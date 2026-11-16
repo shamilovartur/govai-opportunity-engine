@@ -19,15 +19,15 @@ from govai.processes import ProcessError
 
 KIND = 'govai_verified_reference'
 SCHEMA_VERSION = '1'
-REFERENCE_VERSION = 'reference-v3-final6'
+REFERENCE_VERSION = 'reference-v4-editorial'
 SOURCE_SHA256 = '8d9445aca3666c6605c4c38a5baef54a2d8c042462447f7f6fe14c0d5727b6d4'
 NORMALIZED_SHA256 = 'cffad20d3cded12cce2e036f3872e587516e8ee552e9e5efb243bee607fbaa7f'
-PDF_SHA256 = '0d3edf893a2fa63265d88a70b52b496495dffaf94d89dd96270f6fed89d45da6'
-_RESOURCES = Path(__file__).with_name('reference_data') / 'rosim261-v3'
+PDF_SHA256 = 'b3c4a81754bcbc91a180e9088ed12a51c769faa5242c8815504874d705489202'
+_RESOURCES = Path(__file__).with_name('reference_data') / 'rosim261-v4'
 _SOURCE = Path(__file__).resolve().parent.parent / 'examples/rosimushchestvo_261/source.txt'
 _HASHES = {
-    'manifest.json': '9153e9143c1fe80818557a6829e1876056df192039c2e2b031f820187d9cf5dd',
-    'report.json': 'e5d538e36d9ae4751c38134fb6ab713e2d0aa5be216a5a099b076b8819992e9d',
+    'manifest.json': 'c20552b3030ee5fe74bc7bcfa2f6bcecf4a90c6227fe46b4539a525e338dd81e',
+    'report.json': '944155b73ba65d152a8c2528b3783e8828d1341eaed1e008b35afab39bc9dfe3',
     'final.pdf': PDF_SHA256,
 }
 
@@ -73,6 +73,12 @@ def example_document_bytes():
     if sha256(data).hexdigest() != SOURCE_SHA256:
         raise ProcessError('Контрольная сумма полного текста примера не совпала.')
     return data
+
+
+def example_pdf_bytes():
+    """An explicitly labelled sample download, never a match for a visitor's file."""
+    _approved()
+    return _resource('final.pdf')
 
 
 def _binding(document):
@@ -219,35 +225,28 @@ def reference_full_blocks(artifact):
 def reference_view(artifact):
     validate_reference(artifact)
     report = artifact['approved_report']; pages = report['pages']; cards = []
-    inputs = {1: _plain(pages[2]['paragraphs'][2]['text']).replace('\n', ' '),
-              2: 'пояснительная записка, материалы дела и утверждённый шаблон одного вида акта',
-              3: 'вопрос заявителя и утверждённые материалы о порядке услуги'}
-    human = {1: 'Исполнитель проверяет выводы и определяет дальнейшее действие.',
-             2: 'Специалист проверяет правовые основания и исправляет текст. Затем документ проходит обычные согласование и подпись.',
-             3: 'Сотрудник МФЦ проверяет ответ и объясняет заявителю порядок действий.'}
     for item in report['model']['initiatives']:
         rank = item['rank']; key = f'rosim261-initiative-{rank}'
         description = item['ai']
         if rank <= 3:
-            description = 'На входе — ' + inputs[rank].lower() + '. ' + item['ai']
-            description += ' Сотрудник получает ' + item['result'][0].lower() + item['result'][1:]
-            effect = f"{item['hours']} ч на 1 000 операций · {item['before']} → {item['after']} мин на случай. Сценарий, включая проверку и правки сотрудника."
-            resources = f"{item['days'][0]}–{item['days'][1]} человеко-дней. Сценарий для отдельного прототипа, не полного внедрения."
+            description = item['ai'] + ' ' + item['result']
+            effect = f"Сценарий: {item['hours']} ч на 1 000 операций, с проверкой сотрудника."
+            resources = f"Прототип: {item['days'][0]}–{item['days'][1]} человеко-дней, сценарная оценка."
             condition = item['scope']
         else:
             description += ' ' + item['needed']
-            effect = item['needed']; resources = 'Ресурс пока не оценён.'; condition = item['needed']
+            effect = ''; resources = 'Ресурс пока не оценён.'; condition = ''
         cards.append({'id': key, 'number': rank, 'rank': rank, 'title': item['process'], 'process': item['process'],
-                      'description': description, 'input_materials': inputs.get(rank, ''), 'ai_work': item['ai'],
-                      'staff_result': item.get('result', ''), 'human_role': human.get(rank, ''),
+                      'description': description, 'input_materials': '', 'ai_work': item['ai'],
+                      'staff_result': item.get('result', ''), 'human_role': 'Сотрудник проверяет результат и утверждает документ.',
                       'benefit': item.get('result', item['ai']), 'effect': effect, 'resources': resources,
-                      'priority_reason': item.get('why', item.get('reason', '')), 'dependencies': [1] if rank == 2 else [],
+                      'priority_reason': re.split(r'(?<=[.!?])\s+', item.get('why', item.get('reason', '')), maxsplit=1)[0], 'dependencies': [1] if rank == 2 else [],
                       'change_condition': ('Готовая база и большой поток могут поднять приоритет.' if rank == 3 else item.get('needed', 'Сравнить результат с обычным способом на одинаковых материалах.')),
                       'condition': condition, 'clauses': 'пп. ' + item['clauses'],
                       'queue': 'first' if rank <= 3 else 'reserve', 'category_label': 'В первую очередь' if rank <= 3 else 'Резерв',
                       'color': item['fill']})
     heading = _plain(pages[0]['paragraphs'][0]['text']).replace('\n', ' ')
-    intro = _plain(pages[0]['paragraphs'][1]['text'])
+    intro = 'Первые три доработки составляют первую очередь; остальные четыре остаются в резерве.'
     view = {'title': heading, 'summary_heading': heading, 'summary_intro': intro,
             'reference_label': 'Проверенный разбор · редакция 30.05.2023',
             'outcome': {'state': 'ready', 'title': 'Проверенный разбор', 'message': intro, 'action': ''},
@@ -259,7 +258,7 @@ def reference_view(artifact):
             'full_title': 'Административный регламент предоставления федеральных земельных участков без торгов',
             'source_index': [{'number': row['number'], 'clauses': row['clauses']} for row in cards],
             'conditions': [_plain(pages[3]['paragraphs'][-1]['text']), report['economics_scope']],
-            'detail_note': 'В полном отчёте — карта процессов, подробные предложения и расчёт экономики',
+            'detail_note': 'Полный отчёт содержит карту процессов, подробные предложения и расчёт экономики',
             'input_limitation': None, 'highlights': [], 'priority_groups': [], 'pilots': [], 'effects': [],
             'effect_note': 'Сценарные предпосылки не являются измерениями ведомства или доказанной бюджетной экономией.',
             'ordering_note': intro}

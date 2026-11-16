@@ -18,7 +18,7 @@ from govai.opportunity_report import (
     management_view, management_blocks, _block_paragraphs, render_markdown, render_details,
 )
 
-EXPORT_VERSION = 'management-5'
+EXPORT_VERSION = 'management-6'
 _FONT_DIR = Path(__file__).with_name('fonts')
 _FONT_NAME = 'IBM Plex Sans'
 _PAGE_SIZE = (450, 800)
@@ -112,7 +112,7 @@ def _document(view):
     footer.add_run('Страница ').font.size = Pt(10.5)
     field = OxmlElement('w:fldSimple'); field.set(qn('w:instr'), 'PAGE'); footer._p.append(field)
     document.core_properties.title = view['title'][:255]
-    document.core_properties.subject = 'ИИ-доработки, порядок проверки и ожидаемый эффект'
+    document.core_properties.subject = 'AI-доработки, порядок проверки и ожидаемый эффект'
     document.core_properties.author = 'GovAI'
     document.core_properties.keywords = ''
     return document
@@ -133,12 +133,19 @@ def render_docx(artifact, *, view=None):
             previous = block['page']
     else:
         for kind, value in management_blocks(view):
-            if kind in ('heading', 'subheading'):
+            if kind == 'page_break':
+                document.add_page_break()
+            elif kind in ('heading', 'subheading'):
                 document.add_paragraph(str(value), style='Heading 1' if kind == 'heading' else 'Heading 2')
             elif kind == 'conclusion':
                 document.add_paragraph(value['heading'], style='Title')
                 paragraph = document.add_paragraph(value['text']); _shade(paragraph, 'mint')
-            elif kind in ('ranked_card', 'process_group', 'card'):
+            elif kind == 'process_group':
+                paragraphs = list(_block_paragraphs(kind, value))
+                paragraph = document.add_paragraph()
+                paragraph.add_run(paragraphs[0] + '. ').bold = True
+                paragraph.add_run(' '.join(paragraphs[1:]))
+            elif kind in ('ranked_card', 'card'):
                 paragraphs = list(_block_paragraphs(kind, value))
                 heading = document.add_paragraph(paragraphs[0], style='Heading 2')
                 _shade(heading, 'pale' if kind == 'process_group' else 'mint')
@@ -158,12 +165,12 @@ def render_pdf(artifact, *, view=None):
         return reference_pdf(artifact)
     from reportlab.lib import colors
     from reportlab.lib.styles import ParagraphStyle
-    from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     view = management_view(artifact) if view is None else view
     _register_pdf_fonts()
     styles = {
         'body': ParagraphStyle('body', fontName='GovAIPlex', fontSize=12, leading=15.8,
-            spaceAfter=8, textColor=colors.HexColor('#' + _COLORS['text']), allowWidows=False, allowOrphans=False),
+            spaceAfter=7, textColor=colors.HexColor('#' + _COLORS['text']), allowWidows=False, allowOrphans=False),
         'heading': ParagraphStyle('heading', fontName='GovAIPlexBold', fontSize=24.5, leading=28,
             spaceBefore=14, spaceAfter=12, textColor=colors.HexColor('#' + _COLORS['navy']), keepWithNext=True),
         'subheading': ParagraphStyle('subheading', fontName='GovAIPlexBold', fontSize=15, leading=19,
@@ -176,9 +183,9 @@ def render_pdf(artifact, *, view=None):
     stream = BytesIO()
     doc = BaseDocTemplate(stream, pagesize=_PAGE_SIZE, leftMargin=_MARGIN, rightMargin=_MARGIN,
         topMargin=_MARGIN, bottomMargin=_MARGIN, title=view['title'], author='GovAI',
-        subject='ИИ-доработки, порядок проверки и ожидаемый эффект')
+        subject='AI-доработки, порядок проверки и ожидаемый эффект')
 
-    def panel(contents, fill='paper', *, keep_short=True):
+    def panel(contents, fill='paper'):
         table = Table([[contents]], colWidths=[doc.width], splitInRow=1)
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#' + _COLORS[fill])),
@@ -187,17 +194,21 @@ def render_pdf(artifact, *, view=None):
             ('VALIGN', (0, 0), (-1, -1), 'TOP')]))
         # Keep a measured card together only if it fits on a complete page.
         # Oversized cards split at paragraph/line boundaries without clipping.
-        limit = doc.height * .48 if keep_short else doc.height
+        limit = doc.height
         if table.wrap(doc.width, doc.height)[1] <= limit:
             table.splitInRow = 0
         return table
 
     story = []
     for kind, value in management_blocks(view):
-        if kind in ('heading', 'subheading'): story.append(paragraph(value, kind))
+        if kind == 'page_break': story.append(PageBreak())
+        elif kind in ('heading', 'subheading'): story.append(paragraph(value, kind))
         elif kind == 'conclusion':
             story += [paragraph(value['heading'], 'heading'), panel([paragraph(value['text'])], 'mint'), Spacer(1, 8)]
-        elif kind in ('ranked_card', 'process_group', 'card'):
+        elif kind == 'process_group':
+            texts = list(_block_paragraphs(kind, value))
+            story.append(Paragraph('<b>' + escape(texts[0]) + '.</b> ' + escape(' '.join(texts[1:])), styles['body']))
+        elif kind in ('ranked_card', 'card'):
             texts = list(_block_paragraphs(kind, value))
             contents = [paragraph(texts[0], 'subheading'), *[paragraph(text) for text in texts[1:]]]
             if kind == 'card':
@@ -205,7 +216,7 @@ def render_pdf(artifact, *, view=None):
                 # tile. The heading follows its first paragraph across pages.
                 story += [*contents, Spacer(1, 10)]
             else:
-                story += [panel(contents, 'pale' if kind == 'process_group' else 'paper', keep_short=kind == 'ranked_card'), Spacer(1, 10)]
+                story += [panel(contents, 'pale' if kind == 'process_group' else 'paper'), Spacer(1, 6)]
         elif kind == 'notice': story += [panel([paragraph(value['text'])], 'peach'), Spacer(1, 8)]
         elif kind == 'table':
             headers, data = value['headers'], value['rows']
