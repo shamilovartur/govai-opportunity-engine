@@ -1,0 +1,58 @@
+{
+  "kind": "govai_process_checkpoint",
+  "schema_version": "1.0",
+  "analysis_id": "f782e2e8336af9d25cf550253628a83a9d714ad44292bb6853a77e70d23ed8e5",
+  "identity": {
+    "document_sha256": "d2b706b08ce9333e571ec606bb0ae11f0a98a9cddea2806714de6d138cce60cb",
+    "text_sha256": "d2b706b08ce9333e571ec606bb0ae11f0a98a9cddea2806714de6d138cce60cb",
+    "structure_sha256": "2c468d500b547789b124767fb4223d3d746e3036de8244da1c11bf2e49e5e4fd",
+    "provider": "mock-browser",
+    "model": "browser-mock",
+    "prompt_version": "1.0",
+    "prompt_sha256": "browser-fixture-prompt",
+    "output_schema_sha256": "e60228b77e509af1bd9375a46870e655eb58e4edcacf1ab8e2ef53bbe0841193",
+    "chunk_settings": {
+      "core_chars": 6000,
+      "overlap_chars": 1200,
+      "context_chars": 6000,
+      "max_fragments": 100,
+      "max_chunks": 200
+    }
+  },
+  "chunk_inputs": {
+    "chunk-1": "4eaaffa9547885d453bbfba004add6bf3a53107b1873cac26cbc689e1f455587",
+    "chunk-2": "ea4a5fb3ed065fd48d6cb70eb767ab63bf09630e61e591cf9b96cfc28b9c22f1",
+    "chunk-3": "a3ae87c6597b4e44dd3b90afb21713895b5561f5c6b5e81a62d387b6ba6c901b"
+  },
+  "results": {
+    "chunk-1": {
+      "procedures": [
+        {
+          "title": "Регистрация обращения",
+          "anchor": {
+            "fragment_id": "f-22",
+            "quote": "1. Исполнитель регистрирует обращение."
+          },
+          "actions": [
+            {
+              "description": "Зарегистрировать обращение",
+              "actor": null,
+              "inputs": [],
+              "outputs": [],
+              "conditions": [],
+              "dependencies": [],
+              "evidence": [
+                {
+                  "fragment_id": "f-22",
+                  "quote": "1. Исполнитель регистрирует обращение."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "explanation": "Browser mock, no actual API call."
+    }
+  },
+  "updated_at": "2026-11-14T13:36:06.666281+00:00"
+}
